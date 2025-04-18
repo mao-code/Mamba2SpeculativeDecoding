@@ -74,3 +74,11 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+    """
+    python -m script.seq_spec_dec_test \
+    --target state-spaces/mamba-2.8b \
+    --draft  state-spaces/mamba-130m \
+    --prompt "I believe the meaning of life is" \
+    --K 8 --new-tokens 256 --device cuda:0
+    """
