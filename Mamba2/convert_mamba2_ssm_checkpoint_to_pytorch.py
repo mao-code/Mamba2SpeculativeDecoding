@@ -146,12 +146,11 @@ if __name__ == "__main__":
 
     """
     Example usage:
-    python convert_mamba2_ssm_checkpoint_to_pytorch.py \
+    python -m Mamba2.convert_mamba2_ssm_checkpoint_to_pytorch \
         -i ~/.cache/huggingface/hub/models--state-spaces-mamba2-2.7b \
         -m mamba_ssm \
         -p fp16 \
-        -o ./mamba2_converted_weights \
-        -t /path/to/codestral_tokenizer
+        -o ./mamba2_converted_weights
     """
     
     parser = argparse.ArgumentParser()
@@ -163,12 +162,9 @@ if __name__ == "__main__":
         help="Path to a directory containing the `pytorch_model.bin` or `.safetensors` mamba2_ssm checkpoint file to be converted.",
     )
     parser.add_argument(
-        "-m",
-        "--mamba2_model_type",
+        "-m", "--mamba2_model_type",
         type=str,
         default="mamba_ssm",
-        const="mamba_ssm",
-        required=True,
         choices=("codestral", "mamba_ssm"),
         help="The model type the conversion will be performed on. Can choose from either `codestral` or `mamba_ssm`.",
     )
