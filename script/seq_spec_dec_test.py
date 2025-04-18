@@ -34,9 +34,9 @@ def main():
     device = torch.device(args.device)
 
     print("Loading models...")
-    target = Mamba2ForCausalLM.from_pretrained(args.target, torch_dtype=torch.float16, trust_remote_code=True).to(device).eval()
+    target = Mamba2ForCausalLM.from_pretrained(args.target, torch_dtype=torch.float16, trust_remote_code=True, force_download=True).to(device).eval()
 
-    draft  = Mamba2ForCausalLM.from_pretrained(args.draft, torch_dtype=torch.float16, trust_remote_code=True).to(device).eval()
+    draft  = Mamba2ForCausalLM.from_pretrained(args.draft, torch_dtype=torch.float16, trust_remote_code=True, force_download=True).to(device).eval()
 
     tok_tgt = AutoTokenizer.from_pretrained(args.target)
     tok_drf = AutoTokenizer.from_pretrained(args.draft)
