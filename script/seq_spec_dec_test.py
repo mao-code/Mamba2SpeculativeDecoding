@@ -3,6 +3,7 @@ from contextlib import nullcontext
 from transformers import AutoTokenizer
 from Mamba2.modeling_mamba2 import Mamba2ForCausalLM
 from decoding import mamba_spec_decode_seq
+from transformers import AutoConfig
 
 def vanilla_generate(target, prompt_ids, max_new=256, temperature=1.0):
     return target.generate(
@@ -33,8 +34,11 @@ def main():
     device = torch.device(args.device)
 
     print("Loading models …")
-    target = Mamba2ForCausalLM.from_pretrained(args.target, torch_dtype=torch.float16).to(device).eval()
-    draft  = Mamba2ForCausalLM.from_pretrained(args.draft,  torch_dtype=torch.float16).to(device).eval()
+    target_config = AutoConfig.from_pretrained(args.target)
+    target = Mamba2ForCausalLM.from_pretrained(args.target, config=target_config, torch_dtype=torch.float16).to(device).eval()
+
+    draft_config = AutoConfig.from_pretrained(args.draft)
+    draft  = Mamba2ForCausalLM.from_pretrained(args.draft, config=draft_config, torch_dtype=torch.float16).to(device).eval()
 
     tok_tgt = AutoTokenizer.from_pretrained(args.target)
     tok_drf = AutoTokenizer.from_pretrained(args.draft)
@@ -77,8 +81,8 @@ if __name__ == "__main__":
 
     """
     python -m script.seq_spec_dec_test \
-    --target state-spaces/mamba-2.8b \
-    --draft  state-spaces/mamba-130m \
+    --target state-spaces/mamba2-2.7b \
+    --draft  state-spaces/mamba2-130m \
     --prompt "I believe the meaning of life is" \
     --K 8 --new-tokens 256 --device cuda:0
     """
