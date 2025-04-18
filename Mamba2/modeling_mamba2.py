@@ -407,7 +407,7 @@ class Mamba2Mixer(nn.Module):
 
         # 6. Reshape the SSM output and apply normalization via the gated normalization.
         # scan_output comes out as (batch, seq_len, nheads, head_dim) so we reshape it to combine the head dimensions.
-        scan_output = scan_output.view(batch_size, seq_len, -1)
+        scan_output = scan_output.view(batch_size, seq_len, -1) # Every output step from y_1 to y_T
         normalized_output = self.norm(scan_output, gate)
 
         # 7. Finally, perform the linear output projection and return both outputs.
@@ -569,7 +569,7 @@ class Mamba2Mixer(nn.Module):
                 if ssm_state is not None and cache_params is not None:
                     cache_params.update_ssm_state(layer_idx=self.layer_idx, new_ssm_state=ssm_state)
 
-                scan_output = scan_output.view(batch_size, seq_len, -1)
+                scan_output = scan_output.view(batch_size, seq_len, -1) 
                 # Multiply "gate" branch and apply extra normalization layer
                 scan_output = self.norm(scan_output, gate)
 
