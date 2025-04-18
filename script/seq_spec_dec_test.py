@@ -33,12 +33,10 @@ def main():
 
     device = torch.device(args.device)
 
-    print("Loading models …")
-    target_config = AutoConfig.from_pretrained(args.target)
-    target = Mamba2ForCausalLM.from_pretrained(args.target, config=target_config, torch_dtype=torch.float16).to(device).eval()
+    print("Loading models...")
+    target = Mamba2ForCausalLM.from_pretrained(args.target, torch_dtype=torch.float16, trust_remote_code=True).to(device).eval()
 
-    draft_config = AutoConfig.from_pretrained(args.draft)
-    draft  = Mamba2ForCausalLM.from_pretrained(args.draft, config=draft_config, torch_dtype=torch.float16).to(device).eval()
+    draft  = Mamba2ForCausalLM.from_pretrained(args.draft, torch_dtype=torch.float16, trust_remote_code=True).to(device).eval()
 
     tok_tgt = AutoTokenizer.from_pretrained(args.target)
     tok_drf = AutoTokenizer.from_pretrained(args.draft)
