@@ -34,7 +34,7 @@ from transformers.utils import (
     logging,
 )
 from transformers.utils.import_utils import is_causal_conv1d_available, is_mamba_2_ssm_available
-from Mamba2_CDR.configuration_mamba2 import Mamba2Config
+from Mamba2.configuration_mamba2 import Mamba2Config
 
 logger = logging.get_logger(__name__)
 
