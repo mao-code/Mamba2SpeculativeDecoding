@@ -45,6 +45,7 @@ def main():
         torch_dtype=torch.float16, 
         trust_remote_code=True
     ).to(device).eval()
+    target = target.to(torch.float32)
 
     draft_config = AutoConfig.from_pretrained(
         args.draft,
@@ -56,6 +57,7 @@ def main():
         torch_dtype=torch.float16, 
         trust_remote_code=True
     ).to(device).eval()
+    draft  = draft.to(torch.float32)
 
     tok_tgt = AutoTokenizer.from_pretrained(args.target)
     tok_drf = AutoTokenizer.from_pretrained(args.draft)
