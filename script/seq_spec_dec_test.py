@@ -74,13 +74,13 @@ def main():
     # --- vanilla ----------------------------------------------------------
     _, t_vanilla = timed(
         vanilla_generate, target, prompt_ids, attention_mask,
-        max_new=args.new_tokens, temperature=args.temperature
+        max_new=args.new_tokens
     )
 
     # --- speculative ------------------------------------------------------
     _, t_spec = timed(
         mamba_spec_decode_seq, target, draft, prompt_ids,
-        K=args.K, max_new=args.new_tokens, temperature=args.temperature
+        K=args.K, max_new=args.new_tokens
     )
 
     # ----------------------------------------------------------------------
