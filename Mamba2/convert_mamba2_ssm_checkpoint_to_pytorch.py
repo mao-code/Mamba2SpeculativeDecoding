@@ -147,10 +147,10 @@ if __name__ == "__main__":
     """
     Example usage:
     python -m Mamba2.convert_mamba2_ssm_checkpoint_to_pytorch \
-        -i ~/.cache/huggingface/hub/models--state-spaces-mamba2-2.7b \
+        -i ./mamba2-2.7b \
         -m mamba_ssm \
-        -p fp16 \
-        -o ./mamba2_converted_weights
+        -p fp32 \
+        -o ./mamba2-2.7b_converted_weights
     """
     
     parser = argparse.ArgumentParser()

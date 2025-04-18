@@ -5,10 +5,11 @@ from Mamba2.modeling_mamba2 import Mamba2ForCausalLM
 from decoding import mamba_spec_decode_seq
 from transformers import AutoConfig
 
-def vanilla_generate(target, prompt_ids, max_new=256, temperature=1.0):
+def vanilla_generate(target, prompt_ids, attention_mask, max_new=256):
     return target.generate(
-        prompt_ids, max_new_tokens=max_new,
-        temperature=temperature, do_sample=(temperature > 0.0),
+        prompt_ids,  
+        attention_mask=attention_mask,
+        max_new_tokens=max_new,
         pad_token_id=target.config.eos_token_id,
     )[0][len(prompt_ids[0]):]
 
@@ -60,11 +61,19 @@ def main():
     tok_drf = AutoTokenizer.from_pretrained(args.draft)
     assert tok_tgt.vocab_size == tok_drf.vocab_size, "Vocab size mismatch between target and draft models"
 
-    prompt_ids = tok_tgt(args.prompt, return_tensors="pt").input_ids.to(device)
+    encoding = tok_tgt(
+        args.prompt,
+        return_tensors="pt",
+        padding=True,           # pad to longest sequence
+        truncation=True,
+        return_attention_mask=True
+    )
+    prompt_ids      = encoding.input_ids.to(device)
+    attention_mask = encoding.attention_mask.to(device)
 
     # --- vanilla ----------------------------------------------------------
     _, t_vanilla = timed(
-        vanilla_generate, target, prompt_ids,
+        vanilla_generate, target, prompt_ids, attention_mask,
         max_new=args.new_tokens, temperature=args.temperature
     )
 
@@ -97,8 +106,8 @@ if __name__ == "__main__":
 
     """
     python -m script.seq_spec_dec_test \
-    --target state-spaces/mamba2-2.7b \
-    --draft  state-spaces/mamba2-130m \
+    --target ./mamba2-2.7b_converted_weights \
+    --draft  ./mamba2-130m_converted_weights \
     --prompt "I believe the meaning of life is" \
     --K 8 --new-tokens 256 --device cuda:0
     """
