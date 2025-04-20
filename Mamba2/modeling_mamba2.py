@@ -311,7 +311,7 @@ class Mamba2Mixer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         prev_ssm_state: torch.Tensor,
-        *,
+        
         attention_mask: Optional[torch.Tensor] = None,
         return_states: bool = True,          
         return_final:  bool = True            
@@ -370,8 +370,10 @@ class Mamba2Mixer(nn.Module):
             D=self.D, z=None, dt_bias=self.dt_bias,
             initial_states=prev_ssm_state,
             seq_idx=None,
-            return_final_states=True,           # always
-            return_varlen_states=return_states, # to get `states`
+            return_all_states=return_states, # custom triton flag
+            cu_seqlens=None,
+            return_final_states=True,
+            return_varlen_states=False,
             dt_softplus=True, **kwargs_lim
         )
 
@@ -1101,6 +1103,7 @@ class Mamba2Model(Mamba2PreTrainedModel):
                         cache_params=cache_params,
                         cache_position=cache_position,
                         attention_mask=attention_mask,
+
                         cache_fwd=cache_fwd,
                         return_states=return_states,
                         return_final=return_final,

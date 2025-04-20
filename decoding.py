@@ -28,18 +28,21 @@ def mamba_spec_decode_seq(
     # 1‑a. warm‑up forward on target
     out = target(
         input_ids=prompt_ids,
-        use_cache=True, return_dict=True
+        use_cache=True, 
+        return_dict=True
     )
     tgt_cache = out.cache_params               # Mamba2Cache
 
     # 1‑b. give the *same* prompt to draft so it has a cache too
-    draft(
+    _ = draft(
         input_ids=prompt_ids,
         use_cache=True, return_dict=False
     )
     draft_cache = draft.cache_params
 
     while gen_ids.size(1) < prompt_ids.size(1) + max_new:
+        seq_len = gen_ids.size(1)  # Current sequence length
+
         # -------- Draft proposes -----------------------------------------
         step_hist_layers = None           # we'll allocate on first step
         final_states_drf = None
@@ -50,8 +53,10 @@ def mamba_spec_decode_seq(
             drf_out = draft(
                 inputs_embeds=draft.get_input_embeddings()(last_tok),
                 cache_params=draft.cache_params,
-                use_cache=True, cache_fwd=True,
+                use_cache=True, 
+                cache_fwd=True,
                 return_dict=True,      # logits & final_states only
+                cache_position=seq_len + i  # Position for the i-th proposed token
             )
 
             logits_step  = drf_out.logits[:, -1]     # (1,V)
@@ -85,7 +90,8 @@ def mamba_spec_decode_seq(
             return_dict=True,
 
             return_states=True,          
-            return_final=True
+            return_final=True,
+            cache_position=seq_len  # Starting position for the K tokens
         )
         logits   = tgt_out.logits             # (1,K,V)
         probs    = logits.softmax(-1)
@@ -153,17 +159,22 @@ def mamba_vanilla_decode(
     tgt_cache = out.cache_params  # Mamba2Cache
 
     # Generate tokens one by one
+    current_pos = prompt_ids.size(1)  # Initial position after prompt
     for _ in range(max_new):
         last_tok = gen_ids[:, -1:]  # (1, 1)
         out = target(
             inputs_embeds=target.get_input_embeddings()(last_tok),
             cache_params=tgt_cache,
             use_cache=True,
-            return_dict=True
+            return_dict=True,
+            cache_position=current_pos,  # Position for the new token
+
+            cache_fwd=True
         )
         logits = out.logits[:, -1]  # (1, V)
         next_tok = logits.argmax(-1, keepdim=True)  # (1, 1)
         gen_ids = torch.cat([gen_ids, next_tok], dim=1)
+        current_pos += 1  # Increment position
         tgt_cache = out.cache_params  # Update cache
 
     return gen_ids[:, prompt_ids.size(1):]  # New tokens only
