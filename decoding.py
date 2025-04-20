@@ -14,7 +14,7 @@ def _commit_prefix(cache, step_hist, final_hist, m, K):
 
 # decoding_fast.py  (only the core loop shown)
 @torch.inference_mode()
-def mamba_spec_decode(
+def mamba_spec_decode_seq(
     target: Mamba2ForCausalLM,
     draft : Mamba2ForCausalLM,
     prompt_ids: torch.Tensor,
