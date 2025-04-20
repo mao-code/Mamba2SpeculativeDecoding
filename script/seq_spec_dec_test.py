@@ -67,8 +67,7 @@ def main():
 
     # --- vanilla ----------------------------------------------------------
     _, t_vanilla = timed(
-        mamba_vanilla_decode, target, prompt_ids, attention_mask,
-        max_new=args.new_tokens
+        mamba_vanilla_decode, target, prompt_ids, max_new=args.new_tokens
     )
 
     # --- speculative ------------------------------------------------------
