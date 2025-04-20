@@ -2,16 +2,8 @@ import argparse, time, torch
 from contextlib import nullcontext
 from transformers import AutoTokenizer
 from Mamba2.modeling_mamba2 import Mamba2ForCausalLM
-from decoding import mamba_spec_decode_seq
+from decoding import mamba_spec_decode_seq, mamba_vanilla_decode
 from transformers import AutoConfig
-
-def vanilla_generate(target, prompt_ids, attention_mask, max_new=256):
-    return target.generate(
-        prompt_ids,  
-        attention_mask=attention_mask,
-        max_new_tokens=max_new,
-        pad_token_id=target.config.eos_token_id,
-    )[0][len(prompt_ids[0]):]
 
 def timed(fn, *args, **kw):
     torch.cuda.synchronize() if torch.cuda.is_available() else None
@@ -75,7 +67,7 @@ def main():
 
     # --- vanilla ----------------------------------------------------------
     _, t_vanilla = timed(
-        vanilla_generate, target, prompt_ids, attention_mask,
+        mamba_vanilla_decode, target, prompt_ids, attention_mask,
         max_new=args.new_tokens
     )
 

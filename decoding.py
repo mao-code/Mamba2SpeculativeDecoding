@@ -134,3 +134,36 @@ def mamba_spec_decode(
         # loop
 
     return gen_ids[:, prompt_ids.size(1):]     # new tokens only
+
+@torch.inference_mode()
+def mamba_vanilla_decode(
+    target: Mamba2ForCausalLM,
+    prompt_ids: torch.Tensor,
+    max_new: int = 256
+):
+    device = prompt_ids.device
+    gen_ids = prompt_ids.clone()  # (1, L0)
+
+    # Warm-up forward on target (same as speculative)
+    out = target(
+        input_ids=prompt_ids,
+        use_cache=True,
+        return_dict=True
+    )
+    tgt_cache = out.cache_params  # Mamba2Cache
+
+    # Generate tokens one by one
+    for _ in range(max_new):
+        last_tok = gen_ids[:, -1:]  # (1, 1)
+        out = target(
+            inputs_embeds=target.get_input_embeddings()(last_tok),
+            cache_params=tgt_cache,
+            use_cache=True,
+            return_dict=True
+        )
+        logits = out.logits[:, -1]  # (1, V)
+        next_tok = logits.argmax(-1, keepdim=True)  # (1, 1)
+        gen_ids = torch.cat([gen_ids, next_tok], dim=1)
+        tgt_cache = out.cache_params  # Update cache
+
+    return gen_ids[:, prompt_ids.size(1):]  # New tokens only
