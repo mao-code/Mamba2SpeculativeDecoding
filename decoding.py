@@ -2,127 +2,135 @@ import torch
 
 import torch
 import torch.nn.functional as F
+from Mamba2.modeling_mamba2 import Mamba2ForCausalLM, Mamba2Cache
+from typing import Tuple
 
-def mamba_spec_decode_seq(target, draft, prompt_ids, K=8, max_new=256):
-    device   = prompt_ids.device
-    generated = prompt_ids.tolist()[0]
+def _commit_prefix(cache, step_hist, final_hist, m, K):
+    if m == 0:                       # nothing accepted
+        return
+    tgt = final_hist if m == K else [h[:, m-1] for h in step_hist]
+    for l, st in enumerate(tgt):
+        cache.ssm_states[l] = st     # in‑place, O(1)
 
-    # 1. Initial target pass ------------------------------------------------
-    with torch.no_grad():
-        out = target(input_ids=prompt_ids, use_cache=True, return_dict=True)
-    prev_cache = out.cache_params
+# decoding_fast.py  (only the core loop shown)
+@torch.inference_mode()
+def mamba_spec_decode(
+    target: Mamba2ForCausalLM,
+    draft : Mamba2ForCausalLM,
+    prompt_ids: torch.Tensor,
+    K: int = 8,
+    max_new: int = 256,
+    tau: float = 0.5
+):
 
-    for _ in range(max_new):
-        # 2. Draft K tokens -------------------------------------------------
-        draft_ctx  = torch.tensor([generated[-1:]], device=device)
-        draft_step = draft.generate(draft_ctx, max_new_tokens=K, do_sample=False) # greedy
-        d_tokens   = draft_step[:, 1:] # remove seed token, shape: (batch, K)
-
-        # 3. Target *verification* of the K‑token block ---------------------
-        embeds = target.get_input_embeddings()(d_tokens)  # shape: (batch, K, vocab)
-        cache_pos = torch.tensor([embeds.size(1)], dtype=torch.long, device=device)
-
-        tgt_out = target(
-            input_ids       = None,
-            inputs_embeds   = embeds,
-            cache_params    = prev_cache,
-            use_cache       = True,
-            cache_position  = cache_pos,
-            cache_fwd       = True,
-            return_dict     = True,
-        )
-
-        logits_blk = tgt_out.logits          # shape: (batch, K, vocab)
-        pred_tok   = logits_blk.argmax(-1)   # shape: (batch, K)
-
-        # 4. Exact‑match verification --------------------------------------
-        neq_mask   = (pred_tok != d_tokens).squeeze(0) # shape: (K,)
-        mismatch   = torch.where(neq_mask)[0]
-        m = mismatch[0].item() if mismatch.numel() else K
-
-        # 4‑a. Accept the matching prefix ----------------------------------
-        if m > 0:
-            accepted = d_tokens[:, :m] # shape: (batch, m)
-            generated.extend(accepted.squeeze(0).tolist())
-
-            # Re‑run cache_fwd **only for the accepted prefix** to keep cache
-            # You can also save the cache from the first pass and reuse it here
-            acc_emb    = embeds[:, :m, :]
-            acc_out    = target(
-                input_ids=None, inputs_embeds=acc_emb,
-                cache_params=prev_cache, use_cache=True,
-                cache_position=torch.tensor([m], device=device),
-                cache_fwd=True, return_dict=True
-            )
-            prev_cache = acc_out.cache_params
-
-        # 4‑b. Divergence handling -----------------------------------------
-        # Append the last token generated from the target model (mth token) as new token for the draft model to predict next. 
-        if m < K:
-            # use target's token ŷₘ
-            next_tok   = pred_tok[0, m].item()
-            generated.append(next_tok)
-
-            next_emb   = target.get_input_embeddings()(
-                torch.tensor([[next_tok]], device=device)
-            )
-            nxt_out    = target(
-                input_ids=None, inputs_embeds=next_emb,
-                cache_params=prev_cache, use_cache=True,
-                cache_position=torch.tensor([1], device=device),
-                cache_fwd=True, return_dict=True
-            )
-            prev_cache = nxt_out.cache_params
-
-    return generated
-
-
-# TODO: Haven't tested this function yet. Do not use it.
-# Tree‑based speculative decoding: State‑Tree‑Scan (STS)
-def mamba_spec_decode_tree(target, draft, prompt_ids,
-                           B=4, D=4, temperature=1.0, top_p=0.95):
-    """
-    Verifies a B^D‑node token tree via State‑Tree‑Scan in D cache_fwd calls.
-    """
     device = prompt_ids.device
-    tgt_out = target(input_ids=prompt_ids, use_cache=True, return_dict=True)
-    states_lvl = tgt_out.cache_params.ssm_state        # (1,H,hdim,S)
+    gen_ids = prompt_ids.clone()               # (1, L0)
+    # 1‑a. warm‑up forward on target
+    out = target(
+        input_ids=prompt_ids,
+        use_cache=True, return_dict=True
+    )
+    tgt_cache = out.cache_params               # Mamba2Cache
 
-    # draft tree -----------------------------------------------------------
-    tree_tokens = []      # list of tensors with shape (B**lvl,)
-    front = prompt_ids[:, -1:]                         # seed token
-    for lvl in range(D):
-        # sample B tokens for *each* frontier node
-        logits = draft(front)[:, -1, :] / temperature
-        probs  = torch.softmax(logits, -1)
-        tokens = torch.multinomial(probs, B)           # (batch, B)
-        tree_tokens.append(tokens.reshape(-1))         # flatten
-        front = tokens.reshape(1, -1)                  # next frontier
+    # 1‑b. give the *same* prompt to draft so it has a cache too
+    draft(
+        input_ids=prompt_ids,
+        use_cache=True, return_dict=False
+    )
+    draft_cache = draft.cache_params
 
-    # verification ---------------------------------------------------------
-    all_logits = []
-    for lvl, toks in enumerate(tree_tokens):
-        # replicate parent states to children
-        states_lvl = states_lvl.repeat_interleave(B, dim=0)  # (B**lvl,...)
-        embeds     = target.get_input_embeddings()(toks.unsqueeze(0)).squeeze(0)
-        y, states_lvl = target.backbone.cache_fwd(
-            embeds.unsqueeze(0), states_lvl
+    while gen_ids.size(1) < prompt_ids.size(1) + max_new:
+        # -------- Draft proposes -----------------------------------------
+        step_hist_layers = None           # we'll allocate on first step
+        final_states_drf = None
+        prop_buffer      = torch.empty(1, K, dtype=torch.long, device=device)
+
+        last_tok = gen_ids[:, -1:]
+        for i in range(K):
+            drf_out = draft(
+                inputs_embeds=draft.get_input_embeddings()(last_tok),
+                cache_params=draft.cache_params,
+                use_cache=True, cache_fwd=True,
+                return_dict=True,      # logits & final_states only
+            )
+
+            logits_step  = drf_out.logits[:, -1]     # (1,V)
+            next_tok     = logits_step.argmax(-1, keepdim=True)
+            prop_buffer[:, i:i+1] = next_tok         # write in‑place buffer
+
+            # allocate hist tensors once we know shape
+            if step_hist_layers is None:
+                step_hist_layers = [
+                    torch.empty(1, K, *s.shape[2:],
+                    dtype=s.dtype, device=s.device)
+                    for s in drf_out.final_states
+                ]
+
+            for l, st in enumerate(drf_out.final_states):
+                step_hist_layers[l][:, i] = st       # in‑place
+
+            final_states_drf = drf_out.final_states  # state after last tok
+            last_tok = next_tok
+
+        prop           = prop_buffer                 # (1,K)
+        step_hist_drf  = step_hist_layers            # list(L) of in‑place tensors
+
+        # -------- Target verifies *once* ---------------------------------
+        embeds = target.get_input_embeddings()(prop)
+        tgt_out = target(
+            inputs_embeds=embeds,
+            cache_params=tgt_cache,
+            use_cache=True,
+            cache_fwd=True,
+            return_dict=True,
+
+            return_states=True,          
+            return_final=True
         )
-        all_logits.append(y.squeeze(0))                # (B**lvl,1,H)
+        logits   = tgt_out.logits             # (1,K,V)
+        probs    = logits.softmax(-1)
 
-    # choose best branch ---------------------------------------------------
-    # Example policy: accept longest prefix of top‑p branch
-    path_scores = torch.stack(
-        [torch.log_softmax(l, -1).gather(-1, t[:, None]).squeeze(-1)
-         for l, t in zip(all_logits, tree_tokens)]
-    )                                                   # (D, B**lvl)
-    best_idx = path_scores.sum(0).argmax()              # highest log‑prob
-    best_branch = []
-    acc_state   = tgt_out.cache_params.ssm_state
-    for lvl in range(D):
-        tok = tree_tokens[lvl][best_idx % (B**(lvl+1)) // (B**lvl)]
-        best_branch.append(tok.item())
-        # update acc_state by replaying only accepted branch
-        embed = target.get_input_embeddings()(tok.view(1,1))
-        _, acc_state = target.backbone.cache_fwd(embed, acc_state)
-    return best_branch, acc_state
+        # -------- Acceptance test ----------------------------------------
+        conf_ok  = probs.gather(-1, prop.unsqueeze(-1)).squeeze(-1) > tau # if probability of proposed tokens in the target model is higher than tau
+        eq_ok    = logits.argmax(-1).eq(prop) # two models' highest probs
+        good     = conf_ok & eq_ok
+        m        = good.cumprod(-1).sum().item() # number of accepted tokens (everything hits 0 becomes 0 after it)
+
+        # -------- Commit + cache bookkeeping -----------------------------
+        if m:
+            acc_ids   = prop[:, :m]           # accepted tokens
+            gen_ids   = torch.cat([gen_ids, acc_ids], dim=1)
+
+        _commit_prefix(
+            tgt_cache,
+            tgt_out.step_states,      # tuple(L)
+            tgt_out.final_states,     # tuple(L)
+            m, K
+        )
+
+        _commit_prefix(
+            draft_cache,   
+            step_hist_drf,
+            final_states_drf,
+            m, K
+        )
+
+        # -------- Divergence seed ----------------------------------------
+        if m < K:
+            # append target's own token (ŷₘ) (the seed)
+            next_tok = logits[:, m].argmax(-1, keepdim=True)
+            gen_ids  = torch.cat([gen_ids, next_tok], dim=1)
+
+            # advance cache by one real token
+            nxt = target(
+                inputs_embeds=target.get_input_embeddings()(next_tok),
+                cache_params=tgt_cache,
+                use_cache=True,
+                cache_fwd=True,
+                return_dict=True
+            )
+            tgt_cache = nxt.cache_params       # inplace but keep reference
+
+        # loop
+
+    return gen_ids[:, prompt_ids.size(1):]     # new tokens only
