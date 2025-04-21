@@ -4,6 +4,7 @@ from transformers import AutoTokenizer
 from Mamba2.modeling_mamba2 import Mamba2ForCausalLM
 from decoding import mamba_spec_decode_seq, mamba_vanilla_decode
 from transformers import AutoConfig
+from utils import set_random_seed
 
 def timed(fn, *args, **kw):
     torch.cuda.synchronize() if torch.cuda.is_available() else None
@@ -25,6 +26,9 @@ def main():
     args = ap.parse_args()
 
     device = torch.device(args.device)
+
+    # Set random seed
+    set_random_seed(42)
 
     print("Loading models...")
     target_config = AutoConfig.from_pretrained(
