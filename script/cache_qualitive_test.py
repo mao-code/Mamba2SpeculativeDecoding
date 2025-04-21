@@ -75,7 +75,7 @@ def main():
     print("Cache scan decoding...")
     new_input_len = 16
     new_input_ids = vanilla_output_ids[: len(seed_prompt) + new_input_len]
-    new_input_emb = model.get_input_embeddings()(new_input_ids)
+    new_input_emb = model.get_input_embeddings()(new_input_ids.unsqueeze(0))  # (1, L_new, d_model)
     L_prev = input_ids.shape[1]
     cache_position = torch.tensor([L_prev], dtype=torch.long, device=input_ids.device)
     cache = model(input_ids=input_ids, use_cache=True, return_dict=True).cache_params

@@ -52,6 +52,9 @@ def mamba_spec_decode_seq(
     tgt_cache = target(input_ids=prompt_ids, use_cache=True, return_dict=True).cache_params
     draft_cache = draft(input_ids=prompt_ids, use_cache=True, return_dict=True).cache_params
 
+    tE = target.get_input_embeddings()
+    dE = draft.get_input_embeddings()
+
     total_accept_rate = 0
     runs = 0
 
@@ -59,71 +62,73 @@ def mamba_spec_decode_seq(
         runs += 1
         seq_len = gen_ids.size(1)
 
+        remaining      = prompt_ids.size(1) + max_new - seq_len
+        corrected_k    = min(K, remaining)
+
         # Buffers for proposals and probabilities
-        prop_buffer = torch.empty((1, K), dtype=torch.long, device=device)
-        q_buffer    = torch.empty((1, K), dtype=torch.float, device=device)
+        prop_buffer    = torch.empty(1, corrected_k, dtype=torch.long,   device=device)
+        q_buffer       = torch.empty(1, corrected_k, dtype=torch.float,  device=device)
 
         # -------- Draft proposes -----------------------------------------
-        step_hist_layers = None           # we'll allocate on first step
-        final_states_drf = None
-        prop_buffer      = torch.empty(1, K, dtype=torch.long, device=device)
+        last_tok = gen_ids[:, -1:]                       # start from context tail
+        step_hist_layers, final_states_drf = None, None  # will be filled lazily
 
-        last_tok = gen_ids[:, -1:]
-
-        for i in range(K):
-            drf_out = draft(
-                inputs_embeds=draft.get_input_embeddings()(last_tok),
+        for i in range(corrected_k):
+            dr_out = draft(
+                inputs_embeds=dE(last_tok),
                 cache_params=draft_cache,
-                use_cache=True, 
-                cache_fwd=True,
-                return_dict=True,      
-                cache_position=seq_len + i  # Position for the i-th proposed token
+                use_cache=True,  cache_fwd=True,
+                return_dict=True,
+                cache_position=seq_len + i
             )
-            draft_cache = drf_out.cache_params
+            draft_cache = dr_out.cache_params
 
-            logits_step = drf_out.logits[:, -1]      # (1, vocab_size)
-            probs_step  = logits_step.softmax(-1)    # (1, vocab_size)
+            logits_step  = dr_out.logits[:, -1]          # (1, V)
+            probs_step   = logits_step.softmax(-1)
+            next_tok     = logits_step.argmax(-1, keepdim=True)   # greedy draft
+            prop_buffer[:, i : i + 1] = next_tok
+            q_buffer  [:, i] = probs_step.gather(-1, next_tok).squeeze(-1)
 
-            next_tok     = logits_step.argmax(-1, keepdim=True)
-            prop_buffer[:, i:i+1] = next_tok         # write in‑place buffer
-
-            # record drafter probability q
-            q_step = probs_step.gather(-1, next_tok).squeeze(-1)  # (1,)
-            q_buffer[:, i] = q_step
-
-            # allocate history tensors on first iteration
+            # store hidden‑state snapshots for *every* layer
             if step_hist_layers is None:
                 step_hist_layers = [
-                    torch.empty((K, *s.shape), dtype=s.dtype, device=s.device)
-                    for s in drf_out.final_states
+                    torch.empty((corrected_k, *s.shape), dtype=s.dtype, device=s.device)
+                    for s in dr_out.final_states
                 ]
-            # store this step's hidden states
-            for l, st in enumerate(drf_out.final_states):
+            for l, st in enumerate(dr_out.final_states):
                 step_hist_layers[l][i] = st
 
-            final_states_drf = drf_out.final_states
-            last_tok = next_tok
-
-        prop = prop_buffer # (1,K)
-        step_hist_drf = step_hist_layers # list(L) of in‑place tensors
+            final_states_drf = dr_out.final_states
+            last_tok = next_tok      # feed the just‑generated token back in
 
         # -------- Target verifies *once* ---------------------------------
-        embeds = target.get_input_embeddings()(prop)
-        tgt_out = target(
-            inputs_embeds=embeds,
-            cache_params=tgt_cache,
-            use_cache=True,
-            cache_fwd=True,
-            return_dict=True,
-            return_states=True,          
-            return_final=True,
-            cache_position=seq_len  # Starting position for the K tokens
-        )
-        logits   = tgt_out.logits # (1, K, vocab_size)
-        probs    = logits.softmax(-1) # (1, K, vocab_size)
+        # We must include the *last* real context token so that the model
+        # produces logits for **each** proposal in positions
+        #    [seq_len‑1 , … , seq_len+corrected_k‑1].
+        #
+        # We therefore send embeddings for  ( ctx_last ⊕ prop_buffer )
+        ctx_last   = gen_ids[:, -1:]
+        embeds_all = torch.cat([
+            tE(ctx_last),
+            tE(prop_buffer)
+        ], dim=1)                                        # (1, 1+corrected_k, D)
 
-        # record target probabilities p
-        p_buffer = probs.gather(-1, prop.unsqueeze(-1)).squeeze(-1)  # (1, K)
+
+        tgt_out = target(
+            inputs_embeds = embeds_all,
+            cache_params  = tgt_cache,
+            use_cache=True, cache_fwd=True,
+            return_dict=True, return_states=True, return_final=True,
+            cache_position = seq_len - 1                 # start one step earlier
+        )
+        tgt_cache = tgt_out.cache_params
+
+        # logits.shape = (1 , 1+corrected_k , V)
+        #  └─ index 0   = ctx_last     (discard)
+        #  └─ index 1+i = proposal i
+        logits_prop  = tgt_out.logits[:, 1:]             # keep only proposals
+        probs_prop   = logits_prop.softmax(-1)           # (1, corrected_k, V)
+        p_buffer     = probs_prop.gather(-1, prop_buffer.unsqueeze(-1)).squeeze(-1)  # (1, k)
 
         # -------- Acceptance test ----------------------------------------
         # Rejection-sampling acceptance test: u <= p/q (u is from uniform distribution) 
@@ -133,49 +138,38 @@ def mamba_spec_decode_seq(
         m = good.cumprod(-1).sum().item()
 
         total_accept_rate += m / K
-        # print("Acceptance rate: ", m/K)
-
-        print("seq_len:", seq_len)
-        print("proposals:", prop.tolist())
-        print("raw p_buffer:", p_buffer.tolist())
-        print("q_buffer:",     q_buffer.tolist())
 
         # -------- Commit + cache bookkeeping -----------------------------
         # Commit accepted tokens into gen_ids
-        if m > 0:
-            acc = prop[:, :m]
-            gen_ids = torch.cat([gen_ids, acc], dim=1)
+        if m:
+            gen_ids = torch.cat([gen_ids, prop_buffer[:, :m]], dim=1)
 
         # update both caches with accepted histories
-        _commit_prefix(tgt_cache, tgt_out.step_states, tgt_out.final_states, m, K)
-        _commit_prefix(draft_cache, step_hist_drf, final_states_drf, m, K)
+        _commit_prefix(tgt_cache, tgt_out.step_states, tgt_out.final_states, m, corrected_k)
+        _commit_prefix(draft_cache, step_hist_layers, final_states_drf, m, corrected_k)
 
         # -------- Divergence seed ----------------------------------------
-        # 2-e. On first rejection, take target's own next token and advance cache
-        if m < K:
-            seed_tok = logits[:, m].argmax(-1, keepdim=True)
-            gen_ids  = torch.cat([gen_ids, seed_tok], dim=1)
+        # divergence step  (if <k accepted) take target's own token
+        if m < corrected_k:
+            seed_tok  = logits_prop[:, m].argmax(-1, keepdim=True)
+            gen_ids   = torch.cat([gen_ids, seed_tok], dim=1)
 
-            nxt = target(
-                inputs_embeds = target.get_input_embeddings()(seed_tok),
-                cache_params = tgt_cache,
-                use_cache = True,
-                cache_fwd = True,
-                return_dict = True,
-                cache_position = seq_len + m,
-            )
-            tgt_cache = nxt.cache_params
-
-            drf_next = draft(
-                inputs_embeds=draft.get_input_embeddings()(seed_tok),
-                cache_params=draft_cache,
-                use_cache=True,
-                cache_fwd=True,
+            # advance both caches with the *same* seed token
+            tgt_cache = target(
+                inputs_embeds = tE(seed_tok),
+                cache_params  = tgt_cache,
+                use_cache=True, cache_fwd=True,
                 return_dict=True,
-                cache_position=seq_len + m,
-            )
-            draft_cache = drf_next.cache_params
-        # loop
+                cache_position = seq_len + m
+            ).cache_params
+
+            draft_cache = draft(
+                inputs_embeds = dE(seed_tok),
+                cache_params  = draft_cache,
+                use_cache=True, cache_fwd=True,
+                return_dict=True,
+                cache_position = seq_len + m
+            ).cache_params
 
     avg_rate = total_accept_rate / runs if runs > 0 else 0.0
     print(f"Average acceptance rate: {avg_rate:.3f}")
