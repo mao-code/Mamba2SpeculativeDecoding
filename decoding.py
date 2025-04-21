@@ -40,6 +40,9 @@ def mamba_spec_decode_seq(
     # 1‑b. give the *same* prompt to draft so it has a cache too
     draft_cache = draft(input_ids=prompt_ids, use_cache=True,  return_dict=True).cache_params
 
+    total_accept_rate = 0
+    runs = 0
+
     while gen_ids.size(1) < prompt_ids.size(1) + max_new:
         seq_len = gen_ids.size(1)  # Current sequence length
 
@@ -50,6 +53,7 @@ def mamba_spec_decode_seq(
 
         last_tok = gen_ids[:, -1:]
         for i in range(K):
+            runs += 1
             drf_out = draft(
                 inputs_embeds=draft.get_input_embeddings()(last_tok),
                 cache_params=draft_cache,
@@ -102,8 +106,10 @@ def mamba_spec_decode_seq(
         eq_ok    = logits.argmax(-1).eq(prop) # two models' highest probs
         good     = conf_ok & eq_ok
         m        = good.cumprod(-1).sum().item() # number of accepted tokens (everything hits 0 becomes 0 after it)
-        print("Acceptance rate: ", m / K)
 
+        total_accept_rate += m / K
+        print("Acceptance rate: ", m/K)
+        
         # -------- Commit + cache bookkeeping -----------------------------
         if m:
             acc_ids   = prop[:, :m]           # accepted tokens
@@ -141,7 +147,7 @@ def mamba_spec_decode_seq(
             tgt_cache = nxt.cache_params       # inplace but keep reference
 
         # loop
-
+    print("total rate ", total_accept_rate / runs)
     return gen_ids[:, prompt_ids.size(1):]     # new tokens only
 
 @torch.inference_mode()
