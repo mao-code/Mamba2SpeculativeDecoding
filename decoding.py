@@ -3,14 +3,24 @@ import torch
 import torch
 import torch.nn.functional as F
 from Mamba2.modeling_mamba2 import Mamba2ForCausalLM, Mamba2Cache
-from typing import Tuple
+from typing import Tuple, List
 
-def _commit_prefix(cache, step_hist, final_hist, m, K):
-    if m == 0:                       # nothing accepted
+def _commit_prefix(
+    cache: Mamba2Cache,
+    step_hist: List[List[torch.Tensor]],
+    final_hist: Tuple[torch.Tensor, ...],
+    m: int, K: int
+) -> None:
+    """
+    Copy accepted SSM states from verifier to cache **in-place**.
+    For m==K we can just take final_hist (already advanced K steps).
+    """
+    if m == 0:
         return
-    tgt = final_hist if m == K else [h[:, m-1] for h in step_hist]
-    for l, st in enumerate(tgt):
-        cache.ssm_states[l] = st     # in‑place, O(1)
+    src = final_hist if m == K else [h[:, m - 1] for h in step_hist]
+    for l, st in enumerate(src):
+        cache.ssm_states[l].copy_(st)   # O(1) pointer copy on GPU
+
 
 # decoding_fast.py  (only the core loop shown)
 @torch.inference_mode()
@@ -18,28 +28,17 @@ def mamba_spec_decode_seq(
     target: Mamba2ForCausalLM,
     draft : Mamba2ForCausalLM,
     prompt_ids: torch.Tensor,
-    K: int = 8,
+    K: int = 3,
     max_new: int = 256,
-    tau: float = 0.5
+    tau: float = 0.7
 ):
-
     device = prompt_ids.device
     gen_ids = prompt_ids.clone()               # (1, L0)
+    
     # 1‑a. warm‑up forward on target
-    out = target(
-        input_ids=prompt_ids,
-        use_cache=True, 
-        return_dict=True
-    )
-    tgt_cache = out.cache_params               # Mamba2Cache
-
+    tgt_cache = target(input_ids=prompt_ids, use_cache=True, return_dict=True).cache_params 
     # 1‑b. give the *same* prompt to draft so it has a cache too
-    draft_out = draft(
-        input_ids=prompt_ids,
-        use_cache=True, 
-        return_dict=True
-    )
-    draft_cache = draft_out.cache_params
+    draft_cache = draft(input_ids=prompt_ids, use_cache=True,  return_dict=True).cache_params
 
     while gen_ids.size(1) < prompt_ids.size(1) + max_new:
         seq_len = gen_ids.size(1)  # Current sequence length
@@ -103,6 +102,7 @@ def mamba_spec_decode_seq(
         eq_ok    = logits.argmax(-1).eq(prop) # two models' highest probs
         good     = conf_ok & eq_ok
         m        = good.cumprod(-1).sum().item() # number of accepted tokens (everything hits 0 becomes 0 after it)
+        print("Acceptance rate: ", m / K)
 
         # -------- Commit + cache bookkeeping -----------------------------
         if m:
@@ -135,7 +135,8 @@ def mamba_spec_decode_seq(
                 cache_params=tgt_cache,
                 use_cache=True,
                 cache_fwd=True,
-                return_dict=True
+                return_dict=True,
+                cache_position=seq_len + m
             )
             tgt_cache = nxt.cache_params       # inplace but keep reference
 
@@ -149,7 +150,6 @@ def mamba_vanilla_decode(
     prompt_ids: torch.Tensor,
     max_new: int = 256
 ):
-    device = prompt_ids.device
     gen_ids = prompt_ids.clone()  # (1, L0)
 
     # Warm-up forward on target (same as speculative)

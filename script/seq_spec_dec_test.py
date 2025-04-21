@@ -37,7 +37,7 @@ def main():
         torch_dtype=torch.float16, 
         trust_remote_code=True
     ).to(device).eval()
-    target = target.to(torch.float32)
+    target = target.to(torch.float32) # Triton donesn't support float16 on V100 yet
 
     draft_config = AutoConfig.from_pretrained(
         args.draft,
@@ -102,5 +102,5 @@ if __name__ == "__main__":
     --target ./mamba2-2.7b_converted_weights \
     --draft  ./mamba2-130m_converted_weights \
     --prompt "I believe the meaning of life is" \
-    --K 8 --new-tokens 256 --device cuda:0
+    --K 3 --new-tokens 256 --device cuda:0
     """
