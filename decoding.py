@@ -175,7 +175,7 @@ def mamba_spec_decode_seq(
                 cache_position=seq_len + m,
             )
             draft_cache = drf_next.cache_params
-                # loop
+        # loop
 
     avg_rate = total_accept_rate / runs if runs > 0 else 0.0
     print(f"Average acceptance rate: {avg_rate:.3f}")
