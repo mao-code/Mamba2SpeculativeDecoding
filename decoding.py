@@ -34,11 +34,12 @@ def mamba_spec_decode_seq(
     tgt_cache = out.cache_params               # Mamba2Cache
 
     # 1‑b. give the *same* prompt to draft so it has a cache too
-    _ = draft(
+    draft_out = draft(
         input_ids=prompt_ids,
-        use_cache=True, return_dict=False
+        use_cache=True, 
+        return_dict=True
     )
-    draft_cache = draft.cache_params
+    draft_cache = draft_out.cache_params
 
     while gen_ids.size(1) < prompt_ids.size(1) + max_new:
         seq_len = gen_ids.size(1)  # Current sequence length
@@ -52,13 +53,14 @@ def mamba_spec_decode_seq(
         for i in range(K):
             drf_out = draft(
                 inputs_embeds=draft.get_input_embeddings()(last_tok),
-                cache_params=draft.cache_params,
+                cache_params=draft_cache,
                 use_cache=True, 
                 cache_fwd=True,
                 return_dict=True,      # logits & final_states only
                 cache_position=seq_len + i  # Position for the i-th proposed token
             )
 
+            draft_cache = drf_out.cache_params
             logits_step  = drf_out.logits[:, -1]     # (1,V)
             next_tok     = logits_step.argmax(-1, keepdim=True)
             prop_buffer[:, i:i+1] = next_tok         # write in‑place buffer
@@ -66,13 +68,13 @@ def mamba_spec_decode_seq(
             # allocate hist tensors once we know shape
             if step_hist_layers is None:
                 step_hist_layers = [
-                    torch.empty(1, K, *s.shape[2:],
-                    dtype=s.dtype, device=s.device)
+                    # now each has shape (K, 24, 64, 128)
+                    torch.empty((K, *s.shape), dtype=s.dtype, device=s.device)
                     for s in drf_out.final_states
                 ]
 
             for l, st in enumerate(drf_out.final_states):
-                step_hist_layers[l][:, i] = st       # in‑place
+                step_hist_layers[l][i] = st       # in‑place
 
             final_states_drf = drf_out.final_states  # state after last tok
             last_tok = next_tok
