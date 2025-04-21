@@ -98,7 +98,7 @@ def main():
 
     print("Cache scan output:")
     print("Seed Input: ", seed_prompt)
-    print("New Input: ", new_input)
+    print("New Input Ids: ", new_input_ids)
     print(f"Output:", cache_output)
 
     print("=" * 20)
@@ -110,7 +110,7 @@ def main():
     # SHIF RIGHT FOR 1 TOKEN, IT IS THE CULPRIT
     shift_factor = 1
     
-    vanilla_output_cut = vanilla_output[: len(seed_prompt) + len(new_input)+1] 
+    vanilla_output_cut = vanilla_output[: len(seed_prompt) + new_input_len+1] 
     print("Vanilla output cut:", vanilla_output_cut.split())
     print("Cache output split:", cache_output.split())
 
@@ -123,7 +123,7 @@ def main():
 
     print("=" * 20)
     print("Compare the logits only: ")
-    vanilla_logits_prob_cut = vanilla_output_ids[shift_factor: len(seed_prompt) + len(new_input)+1]
+    vanilla_logits_prob_cut = vanilla_output_ids[shift_factor: len(seed_prompt) + new_input_len+1]
     for i, (v, c) in enumerate(zip(vanilla_logits_prob_cut, cache_out_token)):
         if not torch.allclose(v, c):
             print(f"Mismatch at token {i}: vanilla: {v}, cache scan: {c}")
