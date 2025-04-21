@@ -5,22 +5,27 @@ import torch.nn.functional as F
 from Mamba2.modeling_mamba2 import Mamba2ForCausalLM, Mamba2Cache
 from typing import Tuple, List
 
-def _commit_prefix(
-    cache: Mamba2Cache,
-    step_hist: List[List[torch.Tensor]],
-    final_hist: Tuple[torch.Tensor, ...],
-    m: int, K: int
-) -> None:
+def _commit_prefix(cache, step_hist, final_hist, m, K):
     """
-    Copy accepted SSM states from verifier to cache **in-place**.
-    For m==K we can just take final_hist (already advanced K steps).
+    Copy accepted SSM states from verifier to cache **in‑place**.
+    Rewind to the prefix state when no token is accepted (m == 0).
     """
     if m == 0:
+        # ---- Rewind to the state *before* any speculative step -----
+        # time‑step 0 in step_hist is exactly the state after the
+        # last committed token from the previous outer iteration.
+        for l, st in enumerate(step_hist):           # st shape: (K, B, …)
+            cache.ssm_states[l].copy_(st[0])         # back to prefix
         return
-    src = final_hist if m == K else [h[:, m - 1] for h in step_hist]
-    for l, st in enumerate(src):
-        cache.ssm_states[l].copy_(st)   # O(1) pointer copy on GPU
 
+    if m == K:
+        src = final_hist                             # already advanced K
+    else:
+        # take the state *after* the (m‑th) accepted token
+        src = [h[m - 1] for h in step_hist]
+
+    for l, st in enumerate(src):
+        cache.ssm_states[l].copy_(st)
 
 # decoding_fast.py  (only the core loop shown)
 @torch.inference_mode()
@@ -130,6 +135,11 @@ def mamba_spec_decode_seq(
         total_accept_rate += m / K
         # print("Acceptance rate: ", m/K)
 
+        print("seq_len:", seq_len)
+        print("proposals:", prop.tolist())
+        print("raw p_buffer:", p_buffer.tolist())
+        print("q_buffer:",     q_buffer.tolist())
+
         # -------- Commit + cache bookkeeping -----------------------------
         # Commit accepted tokens into gen_ids
         if m > 0:
@@ -155,11 +165,21 @@ def mamba_spec_decode_seq(
                 cache_position = seq_len + m,
             )
             tgt_cache = nxt.cache_params
-        # loop
+
+            drf_next = draft(
+                inputs_embeds=draft.get_input_embeddings()(seed_tok),
+                cache_params=draft_cache,
+                use_cache=True,
+                cache_fwd=True,
+                return_dict=True,
+                cache_position=seq_len + m,
+            )
+            draft_cache = drf_next.cache_params
+                # loop
 
     avg_rate = total_accept_rate / runs if runs > 0 else 0.0
     print(f"Average acceptance rate: {avg_rate:.3f}")
-    
+
     return gen_ids[:, prompt_ids.size(1):]     # new tokens only
 
 @torch.inference_mode()
