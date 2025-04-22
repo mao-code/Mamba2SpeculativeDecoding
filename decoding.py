@@ -35,8 +35,9 @@ def mamba_spec_decode_seq(
     draft : Mamba2ForCausalLM,
     prompt_ids: torch.Tensor,
     K: int = 3,
-    max_new: int = 256,,
+    max_new: int = 256,
     verification_strategy: VerificationStrategy = RatioSamplingStrategy(),
+    log: bool = False
 ):
     """
     q-distribution is the softmax of the logits from the draft model.
@@ -170,7 +171,8 @@ def mamba_spec_decode_seq(
             ).cache_params
 
     avg_rate = total_accept_rate / runs if runs > 0 else 0.0
-    print(f"Average acceptance rate: {avg_rate:.3f}")
+    if log:
+        print(f"Average acceptance rate: {avg_rate:.3f}")
 
     return gen_ids[:, prompt_ids.size(1):]     # new tokens only
 

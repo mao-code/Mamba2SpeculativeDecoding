@@ -5,6 +5,7 @@ from Mamba2.modeling_mamba2 import Mamba2ForCausalLM
 from decoding import mamba_spec_decode_seq, mamba_vanilla_decode
 from transformers import AutoConfig
 from utils import set_random_seed
+from verification import VerificationStrategy, RatioSamplingStrategy, ExactMatchStrategy
 
 def timed(fn, *args, **kw):
     torch.cuda.synchronize() if torch.cuda.is_available() else None
@@ -23,6 +24,7 @@ def main():
     ap.add_argument("--new-tokens", type=int, default=128)
     ap.add_argument("--K",           type=int, default=8)
     ap.add_argument("--temperature", type=float, default=0.0)
+    ap.add_argument("--verification", type=str, default="ratio", choices=["ratio", "exact"])
     args = ap.parse_args()
 
     device = torch.device(args.device)
@@ -75,6 +77,13 @@ def main():
     )
 
     # --- speculative ------------------------------------------------------
+    if args.verification == "ratio":
+        verification_strategy = RatioSamplingStrategy()
+    elif args.verification == "exact":
+        verification_strategy = ExactMatchStrategy()
+    else:
+        raise ValueError(f"Unknown verification strategy: {args.verification}")
+
     _, t_spec = timed(
         mamba_spec_decode_seq, target, draft, prompt_ids,
         K=args.K, max_new=args.new_tokens
@@ -106,5 +115,6 @@ if __name__ == "__main__":
     --target ./mamba2-2.7b_converted_weights \
     --draft  ./mamba2-130m_converted_weights \
     --prompt "I believe the meaning of life is" \
-    --K 3 --new-tokens 256 --device cuda:0
+    --K 3 --new-tokens 256 --device cuda:0 \
+    --verification exact
     """
