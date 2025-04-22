@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 from Mamba2.modeling_mamba2 import Mamba2ForCausalLM, Mamba2Cache
 from typing import Tuple, List
+from verification import VerificationStrategy, RatioSamplingStrategy, ExactMatchStrategy
 
 def _commit_prefix(cache, step_hist, final_hist, m, K):
     """
@@ -34,7 +35,8 @@ def mamba_spec_decode_seq(
     draft : Mamba2ForCausalLM,
     prompt_ids: torch.Tensor,
     K: int = 3,
-    max_new: int = 256,
+    max_new: int = 256,,
+    verification_strategy: VerificationStrategy = RatioSamplingStrategy(),
 ):
     """
     q-distribution is the softmax of the logits from the draft model.
@@ -132,11 +134,7 @@ def mamba_spec_decode_seq(
 
         # -------- Acceptance test ----------------------------------------
         # Rejection-sampling acceptance test: u <= p/q (u is from uniform distribution) 
-        u = torch.rand_like(p_buffer)
-        ratios = p_buffer / q_buffer
-        good = u <= ratios
-        m = good.cumprod(-1).sum().item()
-
+        good, m = verification_strategy.verify(prop_buffer, q_buffer, p_buffer, logits_prop)
         total_accept_rate += m / K
 
         # -------- Commit + cache bookkeeping -----------------------------
