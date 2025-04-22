@@ -116,7 +116,6 @@ def mamba_spec_decode_seq(
             tE(prop_buffer)
         ], dim=1)                                        # (1, 1+corrected_k, D)
 
-
         tgt_out = target(
             inputs_embeds = embeds_all,
             cache_params  = tgt_cache,

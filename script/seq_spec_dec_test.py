@@ -25,6 +25,7 @@ def main():
     ap.add_argument("--K",           type=int, default=8)
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--verification", type=str, default="ratio", choices=["ratio", "exact"])
+    ap.add_argument("--log", action="store_true", help="Log the verification process")
     args = ap.parse_args()
 
     device = torch.device(args.device)
@@ -86,7 +87,8 @@ def main():
 
     _, t_spec = timed(
         mamba_spec_decode_seq, target, draft, prompt_ids,
-        K=args.K, max_new=args.new_tokens
+        K=args.K, max_new=args.new_tokens, verification_strategy=verification_strategy,
+        log=args.log
     )
 
     # ----------------------------------------------------------------------
@@ -116,5 +118,6 @@ if __name__ == "__main__":
     --draft  ./mamba2-130m_converted_weights \
     --prompt "I believe the meaning of life is" \
     --K 3 --new-tokens 256 --device cuda:0 \
-    --verification exact
+    --verification exact \
+    --log
     """
