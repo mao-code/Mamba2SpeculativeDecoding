@@ -9,15 +9,15 @@ from verification import VerificationStrategy, RatioSamplingStrategy, ExactMatch
 def _commit_prefix(cache, step_hist, final_hist, m, K):
     if m == 0:
         # ---- Rewind to the state *before* any speculative step -----
-        for l, st in enumerate(step_hist):           # st shape: (K+1, B, …) (last_ctx + K tokens)
-            cache.ssm_states[l].copy_(st[0])         # back to prefix
+        for l, st in enumerate(step_hist):           # st shape: (B, K+1, …) (last_ctx + K tokens)
+            cache.ssm_states[l].copy_(st[:, 0])      # back to prefix
         return
 
     if m == K:
         src = final_hist
     else:
         # take the state *after* the (m‑th) accepted token
-        src = [h[m - 1] for h in step_hist]
+        src = [h[:, m - 1] for h in step_hist]
 
     for l, st in enumerate(src):
         cache.ssm_states[l].copy_(st)
@@ -89,10 +89,15 @@ def mamba_spec_decode_seq(
 
             # store hidden‑state snapshots for *every* layer
             if step_hist_layers is None:
-                step_hist_layers = [
-                    torch.empty((corrected_k, *s.shape), dtype=s.dtype, device=s.device)
-                    for s in dr_out.final_states
-                ]
+                batch, nheads, head_dim, dstate = dr_out.final_states[0].shape
+                step_hist_layers = tuple(
+                    torch.empty(
+                        (batch, corrected_k, nheads, head_dim, dstate),
+                        dtype=st.dtype,
+                        device=st.device,
+                    )
+                    for st in dr_out.final_states # number of layers
+                )
             for l, st in enumerate(dr_out.final_states):
                 step_hist_layers[l][i] = st
 
@@ -114,6 +119,9 @@ def mamba_spec_decode_seq(
             cache_position = seq_len - 1
         )
         tgt_cache = tgt_out.cache_params
+
+        # step_states: (layers, st shape)
+        # 64 layers (elements in a tuple), (1, 4, 80, 64, 128)
 
         if log:
             print("Length of the step state of the target model: ", len(tgt_out.step_states))
