@@ -117,7 +117,7 @@ if __name__ == "__main__":
     --target ./mamba2-2.7b_converted_weights \
     --draft  ./mamba2-130m_converted_weights \
     --prompt "I believe the meaning of life is" \
-    --K 3 --new-tokens 256 --device cuda:0 \
+    --K 3 --new-tokens 64 --device cuda:0 \
     --verification exact \
     --log
     """

@@ -366,7 +366,8 @@ class Mamba2Mixer(nn.Module):
 
         # ------------- 3. call Triton kernel --------------------------------------
         out, final_state, step_states = mamba_chunk_scan_combined(
-            x_ssm, dt, A, B, C, chunk_size=self.chunk_size,
+            x_ssm, dt, A, B, C, 
+            chunk_size=1, # The chunk size should be 1 to get hidden states of every step 
             D=self.D, z=None, dt_bias=self.dt_bias,
             initial_states=prev_ssm_state,
             seq_idx=None,
@@ -376,6 +377,9 @@ class Mamba2Mixer(nn.Module):
             return_varlen_states=False,
             dt_softplus=True, **kwargs_lim
         )
+
+        # step_states = (layer, states)
+        # Shape of per step_states: (batch, nchunks, nheads, headdim, dstate)
 
         out = out.view(Bsz, L, -1)              # merge heads back
         norm_out = self.norm(out, gate)

@@ -114,11 +114,28 @@ def mamba_spec_decode_seq(
             cache_position = seq_len - 1
         )
         tgt_cache = tgt_out.cache_params
+
+        if log:
+            print("Length of the step state of the target model: ", len(tgt_out.step_states))
+            print("Size of the first element state of the target model: ", tgt_out.step_states[0].size())
+            print("Length of the final state of the target model: ", len(tgt_out.final_states))
+            print("Size of the final sate of the target model: ", tgt_out.final_states[0].size())
+            print("Size of the first layer hist states of the draft model (K,st shape): ", step_hist_layers[0].size())
+
+            print("="*20)
+        
         
         # The last token is the next prediction of the last token for the draf model. (we discard it)
-        logits_prop  = tgt_out.logits[..., :-1]             
+        logits_prop  = tgt_out.logits[:, :-1, :]  # (1, k-1, V)      
         probs_prop   = logits_prop.softmax(-1)
         p_buffer     = probs_prop.gather(-1, prop_buffer.unsqueeze(-1)).squeeze(-1)  # (1, k)
+
+        if log:
+            print("Size of the raw output of the target model", tgt_out.logits.size())
+            print("Size of logits_prop", logits_prop.size())
+            print("Length of prop_buffer", prop_buffer.size(1))
+            print("Length of p_buffer", p_buffer.size(1))
+            print("Length of q_buffer", q_buffer.size(1))
 
         # -------- Acceptance test ----------------------------------------
         # Rejection-sampling acceptance test: u <= p/q (u is from uniform distribution) 
@@ -130,7 +147,7 @@ def mamba_spec_decode_seq(
             eq_mask = prop_buffer.eq(top_tokens)
             matched   = prop_buffer[0][eq_mask[0]].tolist()
             mismatched= prop_buffer[0][~eq_mask[0]].tolist()
-            print(f"[Iter {runs:3d}] matched proposals: {matched} | mismatched: {mismatched} | target: {top_tokens[0].tolist()}")
+            print(f"[Iter {runs:3d}] matched proposals: {matched} | mismatched: {mismatched} | target: {top_tokens[0].tolist()} | draft: {prop_buffer[0].tolist()}")
 
         # -------- Commit + cache bookkeeping -----------------------------
         # Commit accepted tokens into gen_ids
