@@ -98,15 +98,17 @@ def mamba_spec_decode_seq(
                     )
                     for st in dr_out.final_states # number of layers
                 )
+                
             for l, st in enumerate(dr_out.final_states):
-                step_hist_layers[l][i] = st
+                step_hist_layers[l][:, i] = st
 
             final_states_drf = dr_out.final_states
             last_tok = next_tok # feed the just‑generated token back in
 
         # -------- Target verifies *once* ---------------------------------
         ctx_last   = gen_ids[:, -1:]
-        embeds_all = torch.cat([tE(ctx_last), tE(prop_buffer)], dim=1) # (1, 1+corrected_k, D)
+        # embeds_all = torch.cat([tE(ctx_last), tE(prop_buffer)], dim=1) # (1, 1+corrected_k, D)
+        embeds_all = torch.cat([tE(ctx_last), tE(prop_buffer[:, :-1])], dim=1) # (1, corrected_k, D)
 
         tgt_out = target(
             inputs_embeds=embeds_all,
@@ -134,7 +136,8 @@ def mamba_spec_decode_seq(
         
         
         # The last token is the next prediction of the last token for the draf model. (we discard it)
-        logits_prop  = tgt_out.logits[:, :-1, :]  # (1, k-1, V)      
+        # logits_prop  = tgt_out.logits[:, :-1, :]  # (1, k, V)    
+        logits_prop  = tgt_out.logits.clone()  # (1, k, V)    
         probs_prop   = logits_prop.softmax(-1)
         p_buffer     = probs_prop.gather(-1, prop_buffer.unsqueeze(-1)).squeeze(-1)  # (1, k)
 
