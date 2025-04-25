@@ -58,6 +58,8 @@ def main():
     ).to(device).eval()
     draft  = draft.to(torch.float32)
 
+    target, draft  = map(torch.compile, (target.eval(), draft.eval()))
+
     tok_tgt = AutoTokenizer.from_pretrained(args.target)
     tok_drf = AutoTokenizer.from_pretrained(args.draft)
     assert tok_tgt.vocab_size == tok_drf.vocab_size, "Vocab size mismatch between target and draft models"
