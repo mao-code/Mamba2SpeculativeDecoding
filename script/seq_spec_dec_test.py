@@ -58,8 +58,6 @@ def main():
     ).to(device).eval()
     draft  = draft.to(torch.float32)
 
-    target, draft  = map(torch.compile, (target.eval(), draft.eval()))
-
     tok_tgt = AutoTokenizer.from_pretrained(args.target)
     tok_drf = AutoTokenizer.from_pretrained(args.draft)
     assert tok_tgt.vocab_size == tok_drf.vocab_size, "Vocab size mismatch between target and draft models"
@@ -72,12 +70,13 @@ def main():
         return_attention_mask=True
     )
     prompt_ids      = encoding.input_ids.to(device)
-    attention_mask = encoding.attention_mask.to(device)
 
     # --- vanilla ----------------------------------------------------------
-    _, t_vanilla = timed(
+    out_vanilla, t_vanilla = timed(
         mamba_vanilla_decode, target, prompt_ids, max_new=args.new_tokens
     )
+    out_vanilla_text = tok_tgt.decode(out_vanilla.view(-1))
+    print("Vanilla output:", out_vanilla_text)
 
     # --- speculative ------------------------------------------------------
     if args.verification == "ratio":
@@ -87,11 +86,13 @@ def main():
     else:
         raise ValueError(f"Unknown verification strategy: {args.verification}")
 
-    _, t_spec = timed(
+    out_spec, t_spec = timed(
         mamba_spec_decode_seq, target, draft, prompt_ids,
         K=args.K, max_new=args.new_tokens, verification_strategy=verification_strategy,
         log=args.log
     )
+    out_spec_text = tok_tgt.decode(out_spec.view(-1))
+    print("Speculative output:", out_spec_text)
 
     # ----------------------------------------------------------------------
     tok_per_sec_van = args.new_tokens / t_vanilla

@@ -124,16 +124,6 @@ def mamba_spec_decode_seq(
 
         # step_states: (layers, st shape)
         # 64 layers (elements in a tuple), (1, 4, 80, 64, 128)
-
-        if log:
-            print("Length of the step state of the target model: ", len(tgt_out.step_states))
-            print("Size of the first element state of the target model: ", tgt_out.step_states[0].size())
-            print("Length of the final state of the target model: ", len(tgt_out.final_states))
-            print("Size of the final sate of the target model: ", tgt_out.final_states[0].size())
-            print("Size of the first layer hist states of the draft model (K,st shape): ", step_hist_layers[0].size())
-
-            print("="*20)
-        
         
         # The last token is the next prediction of the last token for the draf model. (we discard it)
         # logits_prop  = tgt_out.logits[:, :-1, :]  # (1, k, V)    
@@ -154,11 +144,21 @@ def mamba_spec_decode_seq(
         total_accept_rate += m / K
 
         if log:
-            top_tokens = logits_prop.argmax(dim=-1)
-            eq_mask = prop_buffer.eq(top_tokens)
-            matched   = prop_buffer[0][eq_mask[0]].tolist()
-            mismatched= prop_buffer[0][~eq_mask[0]].tolist()
-            print(f"[Iter {runs:3d}] matched proposals: {matched} | mismatched: {mismatched} | target: {top_tokens[0].tolist()} | draft: {prop_buffer[0].tolist()}")
+            # shapes: eq_mask [B, K]
+            top_tokens = logits_prop.argmax(dim=-1)         # [B, K]
+            eq_mask    = prop_buffer.eq(top_tokens)         # [B, K]
+
+            # eq_mask[0] is a BoolTensor of length K; its cumprod will be 1s up to
+            # first zero, then 0s thereafter. Summing gives exactly the prefix-match length.
+            prefix_mask = eq_mask[0].cumprod(dim=0)         # [K], 1,1,…,0,0,0
+            m = int(prefix_mask.sum().item())
+
+            matched    = prop_buffer[0, :m].tolist()
+            mismatched = prop_buffer[0, m:].tolist()
+
+            print(f"[Iter {runs:3d}] prefix-length: {m} | matched: {matched} | "
+                f"mismatched: {mismatched} | target: {top_tokens[0].tolist()} | "
+                f"draft: {prop_buffer[0].tolist()}")
 
         # -------- Commit + cache bookkeeping -----------------------------
         # Commit accepted tokens into gen_ids
