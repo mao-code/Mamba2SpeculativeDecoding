@@ -6,21 +6,19 @@ from Mamba2.modeling_mamba2 import Mamba2ForCausalLM, Mamba2Cache
 from typing import Tuple, List
 from verification import VerificationStrategy, RatioSamplingStrategy, ExactMatchStrategy
 
-def _commit_prefix(cache, step_hist, final_hist, m, K):
+def _prune_cache(cache, step_hist, m, K):
     if m == 0:
         # ---- Rewind to the state *before* any speculative step -----
         for l, st in enumerate(step_hist):           # st shape: (B, K+1, …) (last_ctx + K tokens)
             cache.ssm_states[l].copy_(st[:, 0])      # back to prefix
         return
 
-    if m == K:
-        src = final_hist
-    else:
-        # take the state *after* the (m‑th) accepted token
-        src = [h[:, m - 1] for h in step_hist]
+    if m < K:
+        # take cache that has seen m tokens 
+        src = [h[:, m-1] for h in step_hist]
 
-    for l, st in enumerate(src):
-        cache.ssm_states[l].copy_(st)
+        for l, st in enumerate(src):
+            cache.ssm_states[l].copy_(st)
 
 # decoding_fast.py  (only the core loop shown)
 @torch.inference_mode()
@@ -28,6 +26,8 @@ def mamba_spec_decode_seq(
     target: Mamba2ForCausalLM,
     draft : Mamba2ForCausalLM,
     prompt_ids: torch.Tensor,
+    pad_token_id: int = 0,
+    eos_tokens_id: int | List[int] = 1,
     K: int = 3,
     max_new: int = 256,
     verification_strategy: VerificationStrategy = RatioSamplingStrategy(),
@@ -43,49 +43,55 @@ def mamba_spec_decode_seq(
     draft.eval()
 
     device = prompt_ids.device
-    L0 = prompt_ids.size(1)  # length of the prompt
+    prompt_len = prompt_ids.size(1)  # length of the prompt
+    max_seq_length = target.config.max_position_embeddings if hasattr(target.config, 'max_position_embeddings') else (target.config.max_context_length if hasattr(target.config, 'max_context_length') else 1024)
+    total_len = min(max_seq_length, prompt_len + max_new)
     
     # 1. Warm-up: run both models on the prompt to fill their caches
-    # Prevent using the last token of the prompt (cache: 0...L0-2)
-    tgt_cache = target(input_ids=prompt_ids[..., :-1], use_cache=True, return_dict=True).cache_params
-    draft_cache = draft(input_ids=prompt_ids[..., :-1], use_cache=True, return_dict=True).cache_params
-    gen_ids = prompt_ids.clone()
+    # Prevent using the last token of the prompt (cache: 0...prompt_len-2)
+    # tgt_cache = target(input_ids=prompt_ids[..., :-1], use_cache=True, return_dict=True).cache_params
+    # draft_cache = draft(input_ids=prompt_ids[..., :-1], use_cache=True, return_dict=True).cache_params
+    tgt_cache, draft_cache = None, None
+    gen_ids = torch.full((1, total_len), pad_token_id, dtype=torch.long, device=target.device)
+    gen_ids[0, :prompt_len] = prompt_ids.clone()
 
-    tE = target.get_input_embeddings()
-    dE = draft.get_input_embeddings()
+    cur_drft_start_pos, cur_drft_end_pos = 0, prompt_len
+    cur_tgt_start_pos, cur_tgt_end_pos = 0, prompt_len
 
-    total_accept_rate = 0
-    runs = 0
+    # tE, dE = target.get_input_embeddings(), draft.get_input_embeddings()
 
-    while gen_ids.size(1) < L0 + max_new:
+    total_accept_rate, runs = 0.0, 0
+
+    while gen_ids.size(1) < total_len:
         runs += 1
         seq_len = gen_ids.size(1)
-        corrected_k = min(K, L0 + max_new - seq_len)
+        corrected_k = min(K, total_len - seq_len)
 
         # Buffers for proposals and probabilities
-        prop_buffer = torch.empty(1, corrected_k, dtype=torch.long, device=device)
+        draft_tok_buffer = torch.empty(1, corrected_k, dtype=torch.long, device=device)
         q_buffer = torch.empty(1, corrected_k, dtype=torch.float, device=device)
 
         # -------- Draft proposes -----------------------------------------
-        last_tok = gen_ids[:, -1:]                       # start from context tail
+        # last_tok = gen_ids[:, -1:] # start from context tail
         step_hist_layers, final_states_drf = None, None  # will be filled lazily
 
         for i in range(corrected_k):
             dr_out = draft(
-                inputs_embeds=dE(last_tok),
+                # inputs_embeds=dE(last_tok),
+                input_ids=gen_ids[..., cur_drft_start_pos:cur_drft_end_pos+i],
                 cache_params=draft_cache,
                 use_cache=True,  
                 cache_fwd=True,
                 return_dict=True,
-                cache_position=seq_len + i - 1
+                cache_position=cur_drft_start_pos
             )
             draft_cache = dr_out.cache_params
 
-            logits_step  = dr_out.logits[:, -1]          # (1, V)
-            probs_step   = logits_step.softmax(-1)
-            next_tok     = logits_step.argmax(-1, keepdim=True)   # greedy draft
-            prop_buffer[:, i : i + 1] = next_tok
-            q_buffer  [:, i] = probs_step.gather(-1, next_tok).squeeze(-1)
+            draft_logits  = dr_out.logits[..., -1, :] 
+            draft_prob   = draft_logits.softmax(-1)
+            next_tok     = draft_logits.argmax(-1, keepdim=True)   # greedy draft
+            draft_tok_buffer[:, i : i + 1] = next_tok
+            q_buffer  [:, i] = draft_prob.gather(-1, next_tok).squeeze(-1)
 
             # store hidden‑state snapshots for *every* layer
             if step_hist_layers is None:
@@ -103,15 +109,20 @@ def mamba_spec_decode_seq(
                 step_hist_layers[l][:, i] = st
 
             final_states_drf = dr_out.final_states
-            last_tok = next_tok # feed the just‑generated token back in
+            # last_tok = next_tok # feed the just‑generated token back in
+
+            gen_ids[0, cur_drft_end_pos+i] = next_tok.squeeze(-1)
+
+            cur_drft_start_pos = cur_drft_end_pos+i
+            cur_drft_end_pos += 1
 
         # -------- Target verifies *once* ---------------------------------
-        ctx_last   = gen_ids[:, -1:]
-        # embeds_all = torch.cat([tE(ctx_last), tE(prop_buffer)], dim=1) # (1, 1+corrected_k, D)
-        embeds_all = torch.cat([tE(ctx_last), tE(prop_buffer[:, :-1])], dim=1) # (1, corrected_k, D)
+        # ctx_last   = gen_ids[:, -1:]
+        # embeds_all = torch.cat([tE(ctx_last), tE(draft_tok_buffer[:, :-1])], dim=1) # (1, corrected_k, D)
 
         tgt_out = target(
-            inputs_embeds=embeds_all,
+            # inputs_embeds=embeds_all,
+            input_ids=gen_ids[..., cur_tgt_start_pos:cur_tgt_end_pos+corrected_k],
             cache_params=tgt_cache,
             use_cache=True, 
             cache_fwd=True,
@@ -122,65 +133,58 @@ def mamba_spec_decode_seq(
         )
         tgt_cache = tgt_out.cache_params
 
-        # step_states: (layers, st shape)
-        # 64 layers (elements in a tuple), (1, 4, 80, 64, 128)
-        
         # The last token is the next prediction of the last token for the draf model. (we discard it)
-        # logits_prop  = tgt_out.logits[:, :-1, :]  # (1, k, V)    
-        logits_prop  = tgt_out.logits.clone()  # (1, k, V)    
-        probs_prop   = logits_prop.softmax(-1)
-        p_buffer     = probs_prop.gather(-1, prop_buffer.unsqueeze(-1)).squeeze(-1)  # (1, k)
-
-        if log:
-            print("Size of the raw output of the target model", tgt_out.logits.size())
-            print("Size of logits_prop", logits_prop.size())
-            print("Length of prop_buffer", prop_buffer.size(1))
-            print("Length of p_buffer", p_buffer.size(1))
-            print("Length of q_buffer", q_buffer.size(1))
+        target_logits  = tgt_out[..., cur_tgt_end_pos-1 : cur_tgt_end_pos+corrected_k-1, :]  # (1, k, V)    
+        target_prob   = target_logits.softmax(-1)
+        p_buffer     = target_prob.gather(-1, draft_tok_buffer.unsqueeze(-1)).squeeze(-1)  # (1, k)
+        tgt_token_buffer = target_logits.argmax(-1)  # (1, k)
 
         # -------- Acceptance test ----------------------------------------
         # Rejection-sampling acceptance test: u <= p/q (u is from uniform distribution) 
-        good, m = verification_strategy.verify(prop_buffer, q_buffer, p_buffer, logits_prop)
+        good, m = verification_strategy.verify(draft_tok_buffer, q_buffer, p_buffer, target_logits)
         total_accept_rate += m / K
 
         if log:
             # shapes: eq_mask [B, K]
-            top_tokens = logits_prop.argmax(dim=-1)         # [B, K]
-            eq_mask    = prop_buffer.eq(top_tokens)         # [B, K]
+            eq_mask    = draft_tok_buffer.eq(tgt_token_buffer)         # [B, K]
 
             # eq_mask[0] is a BoolTensor of length K; its cumprod will be 1s up to
             # first zero, then 0s thereafter. Summing gives exactly the prefix-match length.
             prefix_mask = eq_mask[0].cumprod(dim=0)         # [K], 1,1,…,0,0,0
             m = int(prefix_mask.sum().item())
 
-            matched    = prop_buffer[0, :m].tolist()
-            mismatched = prop_buffer[0, m:].tolist()
+            matched    = draft_tok_buffer[0, :m].tolist()
+            mismatched = draft_tok_buffer[0, m:].tolist()
 
             print(f"[Iter {runs:3d}] prefix-length: {m} | matched: {matched} | "
-                f"mismatched: {mismatched} | target: {top_tokens[0].tolist()} | "
-                f"draft: {prop_buffer[0].tolist()}")
+                f"mismatched: {mismatched} | target: {tgt_token_buffer[0].tolist()} | "
+                f"draft: {draft_tok_buffer[0].tolist()}")
 
         # -------- Commit + cache bookkeeping -----------------------------
         # Commit accepted tokens into gen_ids
-        if m:
-            gen_ids = torch.cat([gen_ids, prop_buffer[..., :m]], dim=1)
+        if m == corrected_k:
+            last_tgt_token = tgt_out[..., cur_tgt_end_pos+corrected_k-1, :].argmax(-1).view(-1, 1)
+            gen_ids[0, cur_tgt_end_pos+corrected_k] = last_tgt_token
+        else:
+            # gen_ids = torch.cat([gen_ids, draft_tok_buffer[..., :m]], dim=1)
+            gen_ids[0, cur_tgt_end_pos:cur_tgt_end_pos+m+1] = tgt_token_buffer[0, :m+1]
+            gen_ids[0, cur_tgt_end_pos+m+1:cur_tgt_end_pos+corrected_k] = pad_token_id
 
-        if gen_ids.size(1) < L0 + max_new:
-            # update both caches with accepted histories
-            _commit_prefix(tgt_cache, tgt_out.step_states, tgt_out.final_states, m, corrected_k)
-            _commit_prefix(draft_cache, step_hist_layers, final_states_drf, m, corrected_k)
+        if gen_ids.size(1) < total_len:
+            cur_tgt_end_pos += m+1
+            cur_tgt_start_pos = cur_tgt_end_pos-1
+            
+            cur_drft_start_pos = cur_tgt_start_pos
+            cur_drft_end_pos = cur_tgt_end_pos
 
-        # -------- Divergence seed ----------------------------------------
-        # divergence step  (if <k accepted) take target's own token
-        if gen_ids.size(1) < L0 + max_new and m < corrected_k:
-            seed_tok  = logits_prop[:, m-1].argmax(-1, keepdim=True)
-            gen_ids   = torch.cat([gen_ids, seed_tok], dim=1)
+            _prune_cache(tgt_cache, tgt_out.step_states, m, corrected_k)
+            _prune_cache(draft_cache, step_hist_layers, m, corrected_k)
 
     avg_rate = total_accept_rate / runs if runs > 0 else 0.0
     if log:
         print(f"Average acceptance rate: {avg_rate:.3f}")
 
-    return gen_ids[:, L0:]     # new tokens only
+    return gen_ids[:, prompt_len:]     # new tokens only
 
 @torch.inference_mode()
 def mamba_vanilla_decode(
@@ -188,7 +192,8 @@ def mamba_vanilla_decode(
     prompt_ids: torch.Tensor,
     max_new: int = 256
 ):
-    gen_ids = prompt_ids.clone()  # (1, L0)
+    target.eval()
+    gen_ids = prompt_ids.clone()  # (1, prompt_len)
 
     # Warm-up forward on target (same as speculative)
     out = target(

@@ -87,7 +87,7 @@ def main():
         raise ValueError(f"Unknown verification strategy: {args.verification}")
 
     out_spec, t_spec = timed(
-        mamba_spec_decode_seq, target, draft, prompt_ids,
+        mamba_spec_decode_seq, target, draft, prompt_ids, pad_token_id=tok_tgt.pad_token_id,
         K=args.K, max_new=args.new_tokens, verification_strategy=verification_strategy,
         log=args.log
     )
@@ -116,6 +116,9 @@ if __name__ == "__main__":
     main()
 
     """
+    "Translate to English: Je m'appelle Romain. N'hésitez pas à contribuer à mon projet !"
+    "I believe the meaning of life is"
+
     python -m script.seq_spec_dec_test \
     --target ./mamba2-2.7b_converted_weights \
     --draft  ./mamba2-130m_converted_weights \
