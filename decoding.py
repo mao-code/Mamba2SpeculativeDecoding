@@ -13,7 +13,7 @@ def _prune_cache(cache, step_hist, m, K):
             cache.ssm_states[l].copy_(st[:, 0])      # back to prefix
         return
 
-    if m < K:
+    elif 1 <= m and m < K:
         # take cache that has seen m tokens 
         src = [h[:, m-1] for h in step_hist]
 
@@ -47,10 +47,6 @@ def mamba_spec_decode_seq(
     max_seq_length = target.config.max_position_embeddings if hasattr(target.config, 'max_position_embeddings') else (target.config.max_context_length if hasattr(target.config, 'max_context_length') else 1024)
     total_len = min(max_seq_length, prompt_len + max_new)
     
-    # 1. Warm-up: run both models on the prompt to fill their caches
-    # Prevent using the last token of the prompt (cache: 0...prompt_len-2)
-    # tgt_cache = target(input_ids=prompt_ids[..., :-1], use_cache=True, return_dict=True).cache_params
-    # draft_cache = draft(input_ids=prompt_ids[..., :-1], use_cache=True, return_dict=True).cache_params
     tgt_cache, draft_cache = None, None
     gen_ids = torch.full((1, total_len), pad_token_id, dtype=torch.long, device=target.device)
     gen_ids[0, :prompt_len] = prompt_ids.clone()
@@ -62,9 +58,9 @@ def mamba_spec_decode_seq(
 
     total_accept_rate, runs = 0.0, 0
 
-    while gen_ids.size(1) < total_len:
+    while cur_tgt_end_pos < total_len:
         runs += 1
-        seq_len = gen_ids.size(1)
+        seq_len = cur_tgt_end_pos
         corrected_k = min(K, total_len - seq_len)
 
         # Buffers for proposals and probabilities
@@ -73,12 +69,12 @@ def mamba_spec_decode_seq(
 
         # -------- Draft proposes -----------------------------------------
         # last_tok = gen_ids[:, -1:] # start from context tail
-        step_hist_layers, final_states_drf = None, None  # will be filled lazily
+        step_hist_layers = None  # will be filled lazily
 
         for i in range(corrected_k):
             dr_out = draft(
                 # inputs_embeds=dE(last_tok),
-                input_ids=gen_ids[..., cur_drft_start_pos:cur_drft_end_pos+i],
+                input_ids=gen_ids[..., cur_drft_start_pos:cur_drft_end_pos],
                 cache_params=draft_cache,
                 use_cache=True,  
                 cache_fwd=True,
@@ -108,20 +104,13 @@ def mamba_spec_decode_seq(
             for l, st in enumerate(dr_out.final_states):
                 step_hist_layers[l][:, i] = st
 
-            final_states_drf = dr_out.final_states
-            # last_tok = next_tok # feed the just‑generated token back in
-
             gen_ids[0, cur_drft_end_pos+i] = next_tok.squeeze(-1)
 
-            cur_drft_start_pos = cur_drft_end_pos+i
+            cur_drft_start_pos = cur_drft_end_pos
             cur_drft_end_pos += 1
 
         # -------- Target verifies *once* ---------------------------------
-        # ctx_last   = gen_ids[:, -1:]
-        # embeds_all = torch.cat([tE(ctx_last), tE(draft_tok_buffer[:, :-1])], dim=1) # (1, corrected_k, D)
-
         tgt_out = target(
-            # inputs_embeds=embeds_all,
             input_ids=gen_ids[..., cur_tgt_start_pos:cur_tgt_end_pos+corrected_k],
             cache_params=tgt_cache,
             use_cache=True, 
@@ -129,12 +118,12 @@ def mamba_spec_decode_seq(
             return_dict=True, 
             return_states=True, 
             return_final=True,
-            cache_position = seq_len - 1
+            cache_position = cur_drft_start_pos
         )
         tgt_cache = tgt_out.cache_params
 
         # The last token is the next prediction of the last token for the draf model. (we discard it)
-        target_logits  = tgt_out[..., cur_tgt_end_pos-1 : cur_tgt_end_pos+corrected_k-1, :]  # (1, k, V)    
+        target_logits  = tgt_out.logits[..., cur_tgt_end_pos-1:cur_tgt_end_pos+corrected_k-1, :]  # (1, k, V)    
         target_prob   = target_logits.softmax(-1)
         p_buffer     = target_prob.gather(-1, draft_tok_buffer.unsqueeze(-1)).squeeze(-1)  # (1, k)
         tgt_token_buffer = target_logits.argmax(-1)  # (1, k)
@@ -163,14 +152,14 @@ def mamba_spec_decode_seq(
         # -------- Commit + cache bookkeeping -----------------------------
         # Commit accepted tokens into gen_ids
         if m == corrected_k:
-            last_tgt_token = tgt_out[..., cur_tgt_end_pos+corrected_k-1, :].argmax(-1).view(-1, 1)
+            last_tgt_token = tgt_out.logits[..., cur_tgt_end_pos+corrected_k-1, :].argmax(-1).view(-1, 1)
             gen_ids[0, cur_tgt_end_pos+corrected_k] = last_tgt_token
         else:
             # gen_ids = torch.cat([gen_ids, draft_tok_buffer[..., :m]], dim=1)
             gen_ids[0, cur_tgt_end_pos:cur_tgt_end_pos+m+1] = tgt_token_buffer[0, :m+1]
             gen_ids[0, cur_tgt_end_pos+m+1:cur_tgt_end_pos+corrected_k] = pad_token_id
 
-        if gen_ids.size(1) < total_len:
+        if cur_tgt_end_pos < total_len:
             cur_tgt_end_pos += m+1
             cur_tgt_start_pos = cur_tgt_end_pos-1
             
@@ -190,36 +179,35 @@ def mamba_spec_decode_seq(
 def mamba_vanilla_decode(
     target: Mamba2ForCausalLM,
     prompt_ids: torch.Tensor,
+    pad_token_id: int = 0,
     max_new: int = 256
 ):
     target.eval()
     gen_ids = prompt_ids.clone()  # (1, prompt_len)
 
-    # Warm-up forward on target (same as speculative)
-    out = target(
-        input_ids=prompt_ids,
-        use_cache=True,
-        return_dict=True
-    )
-    tgt_cache = out.cache_params  # Mamba2Cache
+    prompt_len = prompt_ids.size(1)  # length of the prompt
+    max_seq_length = target.config.max_position_embeddings if hasattr(target.config, 'max_position_embeddings') else (target.config.max_context_length if hasattr(target.config, 'max_context_length') else 1024)
+    total_len = min(max_seq_length, prompt_len + max_new)
+
+    gen_ids = torch.full((1, total_len), pad_token_id, dtype=torch.long, device=target.device)  
+    gen_ids[0, :prompt_len] = prompt_ids.clone()
 
     # Generate tokens one by one
-    current_pos = prompt_ids.size(1)  # Initial position after prompt
-    for _ in range(max_new):
-        last_tok = gen_ids[:, -1:]  # (1, 1)
+    current_pos = 0
+    for i in range(max_new):
         out = target(
-            inputs_embeds=target.get_input_embeddings()(last_tok),
-            cache_params=tgt_cache,
+            input_ids=gen_ids,
             use_cache=True,
             return_dict=True,
-            cache_position=current_pos,  # Position for the new token
+            cache_position=current_pos,
 
             cache_fwd=True
         )
-        logits = out.logits[:, -1]  # (1, V)
-        next_tok = logits.argmax(-1, keepdim=True)  # (1, 1)
-        gen_ids = torch.cat([gen_ids, next_tok], dim=1)
-        current_pos += 1  # Increment position
-        tgt_cache = out.cache_params  # Update cache
 
-    return gen_ids[:, prompt_ids.size(1):]  # New tokens only
+        logits = out.logits[:, -1, :]  # (1, V)
+        next_tok = logits.argmax(-1, keepdim=True)  # (1, 1)
+
+        current_pos = prompt_len + i
+        gen_ids[0, current_pos] = next_tok.squeeze(-1)
+
+    return gen_ids[:, prompt_len:]  # New tokens only

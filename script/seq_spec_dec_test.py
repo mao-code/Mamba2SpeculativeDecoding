@@ -73,7 +73,7 @@ def main():
 
     # --- vanilla ----------------------------------------------------------
     out_vanilla, t_vanilla = timed(
-        mamba_vanilla_decode, target, prompt_ids, max_new=args.new_tokens
+        mamba_vanilla_decode, target, prompt_ids, pad_token_id=tok_tgt.pad_token_id, max_new=args.new_tokens
     )
     out_vanilla_text = tok_tgt.decode(out_vanilla.view(-1))
     print("Vanilla output:", out_vanilla_text)
