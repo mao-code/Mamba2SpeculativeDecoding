@@ -87,8 +87,8 @@ def main():
         raise ValueError(f"Unknown verification strategy: {args.verification}")
 
     out_spec, t_spec = timed(
-        mamba_spec_decode_seq, target, draft, prompt_ids, pad_token_id=tok_tgt.pad_token_id, eos_tokens_id=tok_tgt.eos_token_id, K=args.K, max_new=args.new_tokens, verification_strategy=verification_strategy,
-        log=args.log
+        mamba_spec_decode_seq, target, draft, prompt_ids, pad_token_id=tok_tgt.pad_token_id, K=args.K, max_new=args.new_tokens, verification_strategy=verification_strategy,
+        log=args.log, tokenizer=tok_tgt
     )
     out_spec_text = tok_tgt.decode(out_spec.view(-1))
     print("Speculative output:", out_spec_text)

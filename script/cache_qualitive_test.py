@@ -107,7 +107,6 @@ def main():
 
     print("Vanilla original output split:", vanilla_output.split())
 
-    # SHIF RIGHT FOR 1 TOKEN, IT IS THE CULPRIT
     shift_factor = 1
     
     vanilla_output_cut = vanilla_output[: len(seed_prompt) + new_input_len+1] 

@@ -310,8 +310,8 @@ class Mamba2Mixer(nn.Module):
     def cache_fwd(
         self,
         hidden_states: torch.Tensor,
-        prev_ssm_state: torch.Tensor,
-        
+        cache_params: Optional[Mamba2Cache],
+
         attention_mask: Optional[torch.Tensor] = None,
         return_states: bool = True,          
         return_final:  bool = True            
@@ -321,10 +321,15 @@ class Mamba2Mixer(nn.Module):
         return the full per-token SSM state trajectory in addition to the
         final state needed for autoregressive generation.
         """
+        if cache_params is not None:
+            # Use the state kept in the cache instead of the positional argument
+            prev_ssm_state = cache_params.ssm_states[self.layer_idx]      # (B, n_heads, head_dim, d_state)
+
+        Bsz, L, _ = hidden_states.shape
 
         # ------------- 1. projections identical to original ----------------------
-        proj = self.in_proj(hidden_states)
-        Bsz, L, _ = proj.shape
+        proj = self.in_proj(hidden_states) # (B, L, proj_dim)
+        # Bsz, L, _ = proj.shape
 
         groups_time_state = self.n_groups * self.ssm_state_size
         d_mlp  = (proj.size(-1) - 2*self.intermediate_size
@@ -365,6 +370,8 @@ class Mamba2Mixer(nn.Module):
         C     = C.view(Bsz, L, self.n_groups, -1)
 
         # ------------- 3. call Triton kernel --------------------------------------
+        need_final = return_final or cache_params is not None
+
         out, final_state, step_states = mamba_chunk_scan_combined(
             x_ssm, dt, A, B, C, 
             chunk_size=1, # The chunk size should be 1 to get hidden states of every step 
@@ -373,17 +380,39 @@ class Mamba2Mixer(nn.Module):
             seq_idx=None,
             return_all_states=return_states, # custom triton flag
             cu_seqlens=None,
-            return_final_states=True,
+            return_final_states=need_final,
             return_varlen_states=False,
             dt_softplus=True, **kwargs_lim
         )
-
-        # step_states = (layer, states)
-        # Shape of per step_states: (batch, nchunks, nheads, headdim, dstate)
+        # out:          (B, L_new, n_heads, head_dim)
+        # final_state:  (B, n_heads, head_dim, d_state)
+        # step_states:  (B, L_new, n_heads, head_dim, d_state)   if return_states
 
         out = out.view(Bsz, L, -1)              # merge heads back
         norm_out = self.norm(out, gate)
         y = self.out_proj(norm_out)
+
+        # --------- cache bookkeeping ---------
+        if cache_params is not None:
+            # ----- a. convolution ring-buffer -----
+            # We just processed `conv_data` (shape B, L_new, conv_dim).
+            # Store the latest L_conv tokens so the *next* single-step call
+            # can do fast causal_conv1d_update.
+            conv_states = nn.functional.pad(
+                conv_data.transpose(1, 2),                # (B, conv_dim, L_new)
+                (cache_params.conv_kernel_size - L, 0)
+            )
+            cache_params.update_conv_state(
+                layer_idx=self.layer_idx,
+                new_conv_state=conv_states,
+                cache_init=True                           # same flag you used elsewhere
+            )
+
+            # ----- b. SSM state -----
+            cache_params.update_ssm_state(
+                layer_idx=self.layer_idx,
+                new_ssm_state=final_state                 # kernel already returns fp32
+            )
 
         if return_states and return_final:
             return y, step_states, final_state
@@ -762,7 +791,7 @@ class Mamba2Mixer(nn.Module):
         if is_fast_path_available and "cuda" in self.in_proj.weight.device.type:
             # Our new forward path with cache flag
             if cache_fwd:
-                return self.cache_fwd(hidden_states, cache_params.ssm_states[self.layer_idx], attention_mask, return_states = return_states, return_final = return_final)
+                return self.cache_fwd(hidden_states, cache_params, attention_mask, return_states = return_states, return_final = return_final)
 
             return self.cuda_kernels_forward(hidden_states, cache_params, cache_position, attention_mask)
         dtype = hidden_states.dtype

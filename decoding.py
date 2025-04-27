@@ -22,11 +22,11 @@ def mamba_spec_decode_seq(
     draft : Mamba2ForCausalLM,
     prompt_ids: torch.Tensor,
     pad_token_id: int = 0,
-    eos_tokens_id: int | List[int] = 1,
     K: int = 3,
     max_new: int = 256,
     verification_strategy: VerificationStrategy = RatioSamplingStrategy(),
-    log: bool = False
+    log: bool = False,
+    tokenizer = None
 ):
     """
     q-distribution is the softmax of the logits from the draft model.
@@ -63,6 +63,15 @@ def mamba_spec_decode_seq(
     tgt_cache = tgt_out.cache_params
     cur_tgt_start_pos, cur_tgt_end_pos = prompt_len-1, prompt_len
 
+    # dr_out = draft(
+    #     input_ids=gen_ids[..., : prompt_len-1],
+    #     use_cache=True,
+    #     return_dict=True,
+    #     cache_position=pos,
+    # )
+    # draft_cache = dr_out.cache_params
+    # cur_drft_start_pos, cur_drft_end_pos = prompt_len-1, prompt_len
+
     while cur_tgt_end_pos < total_len:
         runs += 1
         seq_len = cur_tgt_end_pos
@@ -75,19 +84,20 @@ def mamba_spec_decode_seq(
         # -------- Draft proposes -----------------------------------------
         step_hist_layers = None  # will be filled lazily
 
+        # BUG: 感覺問題出在這裡 (輸出很奇怪, qualitative test又表示模型正常)
         for i in range(corrected_k):
             pos = torch.arange(cur_drft_start_pos, cur_drft_end_pos, device=device)
             dr_out = draft(
                 input_ids=gen_ids[..., cur_drft_start_pos:cur_drft_end_pos],
                 cache_params=draft_cache,
                 use_cache=True,  
-                cache_fwd=True,
                 return_dict=True,
                 cache_position=pos
             )
             draft_cache = dr_out.cache_params
+            final_states = draft_cache.ssm_states
 
-            draft_logits  = dr_out.logits[..., -1, :] 
+            draft_logits  = dr_out.logits[:, -1, :] 
             draft_prob   = draft_logits.softmax(-1)
             next_tok     = draft_logits.argmax(-1, keepdim=True)   # greedy draft
             draft_tok_buffer[:, i : i + 1] = next_tok
@@ -95,17 +105,17 @@ def mamba_spec_decode_seq(
 
             # store hidden‑state snapshots for *every* layer
             if step_hist_layers is None:
-                batch, nheads, head_dim, dstate = dr_out.final_states[0].shape
+                batch, nheads, head_dim, dstate = final_states[0].shape
                 step_hist_layers = tuple(
                     torch.empty(
                         (batch, corrected_k, nheads, head_dim, dstate),
                         dtype=st.dtype,
                         device=st.device,
                     )
-                    for st in dr_out.final_states # number of layers
+                    for st in final_states # number of layers
                 )
                 
-            for l, st in enumerate(dr_out.final_states):
+            for l, st in enumerate(final_states):
                 # shape of st: (batch, nheads, head_dim, dstate)
                 step_hist_layers[l][:, i] = st
 
@@ -114,8 +124,13 @@ def mamba_spec_decode_seq(
             cur_drft_start_pos = cur_drft_end_pos
             cur_drft_end_pos += 1
 
+        if log:
+            print(f"[Iter {runs:3d}] Draft tokens: ", tokenizer.decode(draft_tok_buffer[0].tolist()))
+            print(f"Gen Ids: ", tokenizer.decode(gen_ids[0, :].tolist()))
+
         # -------- Target verifies *once* ---------------------------------
         pos = torch.arange(cur_tgt_start_pos, cur_tgt_end_pos+corrected_k, device=device) 
+        # BUG: cache_fwd沒有update conv state和ssm state
         tgt_out = target(
             input_ids=gen_ids[..., cur_tgt_start_pos:cur_tgt_end_pos+corrected_k],
             cache_params=tgt_cache,
@@ -134,6 +149,11 @@ def mamba_spec_decode_seq(
 
         p_buffer     = target_draft_prob.gather(-1, draft_tok_buffer.unsqueeze(-1)).squeeze(-1)  # (1, k)
         tgt_token_buffer = target_draft_logits.argmax(-1)  # (1, k)
+
+        if log:
+            all_tgt_tokens = tgt_out.logits[:, :corrected_k+1, :].argmax(-1)
+            print(f"\n[Iter {runs:3d}] Target tokens: ", tokenizer.decode(all_tgt_tokens[0].tolist()))
+
 
         # -------- Acceptance test ----------------------------------------
         # Rejection-sampling acceptance test: u <= p/q (u is from uniform distribution) 
@@ -166,8 +186,12 @@ def mamba_spec_decode_seq(
             gen_ids[0, cur_tgt_end_pos+m+1:cur_tgt_end_pos+corrected_k] = pad_token_id
 
             # steps cache shape: num layers in a tuple, with each state shape (batch, steps, nheads, head_dim, dstate)
+
             _prune_cache(tgt_cache, tgt_out.step_states, corrected_k - m + 1)
             _prune_cache(draft_cache, step_hist_layers, corrected_k - m)
+
+        if log:
+            print(f"[Iter {runs:3d}] Gen Ids (After): ", tokenizer.decode(gen_ids[0, :].tolist()))
 
         cur_tgt_end_pos += m+1
         cur_tgt_start_pos = cur_tgt_end_pos-1
