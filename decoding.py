@@ -6,14 +6,15 @@ from Mamba2.modeling_mamba2 import Mamba2ForCausalLM, Mamba2Cache
 from typing import Tuple, List
 from verification import VerificationStrategy, RatioSamplingStrategy, ExactMatchStrategy
 
-def _prune_cache(cache, step_hist, num_tokens_to_prune):
-    assert num_tokens_to_prune > 0, "num_tokens_to_prune must be greater than 0"
+# def _prune_cache(cache, step_hist, num_tokens_to_prune):
+#     assert num_tokens_to_prune > 0, "num_tokens_to_prune must be greater than 0"
 
-    for l, st in enumerate(step_hist):   
-        # shape of st: (batch, K, nheads, head_dim, dstate)
-        # shape of cache.ssm_states[l]: (batch, nheads, head_dim, dstate)       
-        # target and draft have different length of cache (target has one more token)
-        cache.ssm_states[l].copy_(st[:, -num_tokens_to_prune, :, :, :])      
+#     # BUG: ssm和conv state都要prune
+#     for l, st in enumerate(step_hist):   
+#         # shape of st: (batch, K, nheads, head_dim, dstate)
+#         # shape of cache.ssm_states[l]: (batch, nheads, head_dim, dstate)       
+#         # target and draft have different length of cache (target has one more token)
+#         cache.ssm_states[l].copy_(st[:, -num_tokens_to_prune, :, :, :])      
 
 # decoding_fast.py  (only the core loop shown)
 @torch.inference_mode()
@@ -82,9 +83,10 @@ def mamba_spec_decode_seq(
         q_buffer = torch.empty(1, corrected_k, dtype=torch.float, device=device)
 
         # -------- Draft proposes -----------------------------------------
-        step_hist_layers = None  # will be filled lazily
+        draft_hist_caches = []
 
         # BUG: 感覺問題出在這裡 (輸出很奇怪, qualitative test又表示模型正常)
+        # 每一步的conv state都不一樣，也需要存
         for i in range(corrected_k):
             pos = torch.arange(cur_drft_start_pos, cur_drft_end_pos, device=device)
             dr_out = draft(
@@ -95,7 +97,6 @@ def mamba_spec_decode_seq(
                 cache_position=pos
             )
             draft_cache = dr_out.cache_params
-            final_states = draft_cache.ssm_states
 
             draft_logits  = dr_out.logits[:, -1, :] 
             draft_prob   = draft_logits.softmax(-1)
@@ -103,21 +104,7 @@ def mamba_spec_decode_seq(
             draft_tok_buffer[:, i : i + 1] = next_tok
             q_buffer  [:, i] = draft_prob.gather(-1, next_tok).squeeze(-1)
 
-            # store hidden‑state snapshots for *every* layer
-            if step_hist_layers is None:
-                batch, nheads, head_dim, dstate = final_states[0].shape
-                step_hist_layers = tuple(
-                    torch.empty(
-                        (batch, corrected_k, nheads, head_dim, dstate),
-                        dtype=st.dtype,
-                        device=st.device,
-                    )
-                    for st in final_states # number of layers
-                )
-                
-            for l, st in enumerate(final_states):
-                # shape of st: (batch, nheads, head_dim, dstate)
-                step_hist_layers[l][:, i] = st
+            draft_hist_caches.append(draft_cache)
 
             gen_ids[0, cur_drft_end_pos] = next_tok.squeeze(-1)
 
@@ -137,8 +124,6 @@ def mamba_spec_decode_seq(
             use_cache=True, 
             cache_fwd=True,
             return_dict=True, 
-            return_states=True, 
-            return_final=True,
             cache_position = pos
         )
         tgt_cache = tgt_out.cache_params
@@ -179,16 +164,24 @@ def mamba_spec_decode_seq(
         # -------- Commit + cache bookkeeping -----------------------------
         # Commit accepted tokens into gen_ids
         if m == corrected_k:
-            last_tgt_token = tgt_out.logits[:, corrected_k, :].argmax(-1)[0]
-            gen_ids[0, cur_tgt_end_pos+corrected_k] = last_tgt_token
+            if cur_tgt_end_pos+corrected_k < total_len:
+                last_tgt_token = tgt_out.logits[:, corrected_k, :].argmax(-1)[0]
+                gen_ids[0, cur_tgt_end_pos+corrected_k] = last_tgt_token
         else: # m < K
             gen_ids[0, cur_tgt_end_pos+m] = tgt_token_buffer[0, m]
             gen_ids[0, cur_tgt_end_pos+m+1:cur_tgt_end_pos+corrected_k] = pad_token_id
 
             # steps cache shape: num layers in a tuple, with each state shape (batch, steps, nheads, head_dim, dstate)
 
-            _prune_cache(tgt_cache, tgt_out.step_states, corrected_k - m + 1)
-            _prune_cache(draft_cache, step_hist_layers, corrected_k - m)
+            # _prune_cache(tgt_cache, tgt_out.step_states, corrected_k - m + 1)
+            # _prune_cache(draft_cache, step_hist_layers, corrected_k - m)
+
+            # draft_hist_caches: (steps, layers, mamba2_cache)
+            draft_cache = draft_hist_caches[-(corrected_k - m)]
+
+            # target_hist_caches: (layers, steps, mamba2_cache)
+            # target_cache: (layers, mamba2_cache)
+            tgt_cache = tgt_out.caches[:, -(corrected_k - m + 1)]
 
         if log:
             print(f"[Iter {runs:3d}] Gen Ids (After): ", tokenizer.decode(gen_ids[0, :].tolist()))
