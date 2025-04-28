@@ -314,7 +314,6 @@ class Mamba2Mixer(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,         
     ):
         B, K, _ = hidden_states.shape
-        device = hidden_states.device
         k_size = self.conv_kernel_size
         needs_cache = cache_params is not None
 
@@ -322,7 +321,7 @@ class Mamba2Mixer(nn.Module):
         # 1.  Linear projection and causal-conv on the *whole* block
         # ---------------------------------------------------------------------
         proj = self.in_proj(hidden_states) # (B,K,proj_dim)
-        gts = self.n_groups * self.ssm_state_size # groups·state
+        gts = self.n_groups * self.ssm_state_size # groups time state size
         d_mlp = (proj.size(-1) - 2*self.intermediate_size - 2*gts - self.num_heads) // 2
 
         _, _, gate, xBC, dt = proj.split(
@@ -351,8 +350,10 @@ class Mamba2Mixer(nn.Module):
         # 2.  Prepare arguments for the selective-scan kernel
         # ---------------------------------------------------------------------
         A        = -torch.exp(self.A_log.float())
-        dt       = dt[..., None].expand(-1, -1, self.head_dim)         # (B,K,hdim)
-        h_ssm    = h.view(B, K, self.num_heads, self.head_dim)
+        kwargs_lim = {} if self.time_step_limit == (0., float("inf")) else {"dt_limit": self.time_step_limit}
+
+        # dt       = dt[..., None].expand(-1, -1, self.head_dim)         # (B,K,hdim)
+        h_ssm = _reshape_for_ssm(h, self.num_heads, self.head_dim)
         B_mat    = B_mat.view(B, K, self.n_groups, -1)
         C_mat    = C_mat.view(B, K, self.n_groups, -1)
         prev_ssm = (cache_params.ssm_states[self.layer_idx] if
@@ -369,6 +370,7 @@ class Mamba2Mixer(nn.Module):
             return_all_states = True,
             return_final_states = True,
             dt_softplus = True,
+            **kwargs_lim
         )   
         
         # shapes:
@@ -388,9 +390,9 @@ class Mamba2Mixer(nn.Module):
 
             # 3-b) sliding window over the last axis gives next-step conv caches
             #      unfold → (B,conv_dim,K, k)  ;   we drop the first window (old state)
-            traj = full.unfold(dimension=-1, size=k_size, step=1)      # (B,conv_dim,k+1,K)
-            traj = traj[..., 1:]                                       # keep K newest
-            traj = traj.permute(3, 0, 1, 2)                            # (K,B,conv_dim,k)
+            windows = full.unfold(-1, k_size, 1)        # (B,conv_dim,windows,k_size)
+            traj = windows[..., -K:, :]                 # keep the last K windows
+            traj = traj.permute(2, 0, 1, 3).contiguous()# (K, B, conv_dim, k_size)
 
             # 3-c)  Assemble a *tuple* of cache objects (cheap shallow copies)
             caches = ()
@@ -406,7 +408,7 @@ class Mamba2Mixer(nn.Module):
 
             # finally update in-place for the *next* bulk call
             cache_params.update_conv_state(
-                self.layer_idx, traj[-1], cache_init=False)
+                self.layer_idx, traj[-1, :, :, :].transpose(1, 2), cache_init=False)
             cache_params.update_ssm_state(
                 self.layer_idx, final_ssm)
 
