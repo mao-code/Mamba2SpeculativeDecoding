@@ -16,6 +16,17 @@ from verification import VerificationStrategy, RatioSamplingStrategy, ExactMatch
 #         # target and draft have different length of cache (target has one more token)
 #         cache.ssm_states[l].copy_(st[:, -num_tokens_to_prune, :, :, :])      
 
+def _prune_target_cache(cache, ssm_steps, conv_steps, num_tokens_to_prune):
+    assert num_tokens_to_prune > 0, "num_tokens_to_prune must be greater than 0"
+
+    # ssm_steps: (layers, (B, K, ...)) Tuple of tensors
+    # conv_steps: (layers, (B, K, ...)) Tuple of tensors
+
+    for l, (ssm, conv) in enumerate(zip(ssm_steps, conv_steps)):
+        cache.ssm_states[l].copy_(ssm[:, -num_tokens_to_prune, :, :, :])
+        cache.conv_states[l].copy_(conv[:, -num_tokens_to_prune, :, :])
+
+
 # decoding_fast.py  (only the core loop shown)
 @torch.inference_mode()
 def mamba_spec_decode_seq(
@@ -181,7 +192,7 @@ def mamba_spec_decode_seq(
 
             # target_hist_caches: (layers, steps, mamba2_cache)
             # target_cache: (layers, mamba2_cache)
-            tgt_cache = tgt_out.caches[:, -(corrected_k - m + 1)]
+            _prune_target_cache(tgt_cache, tgt_out.ssm_steps, tgt_out.conv_steps, corrected_k - m + 1)
 
         if log:
             print(f"[Iter {runs:3d}] Gen Ids (After): ", tokenizer.decode(gen_ids[0, :].tolist()))

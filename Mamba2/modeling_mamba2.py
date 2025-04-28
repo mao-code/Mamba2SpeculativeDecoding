@@ -392,31 +392,19 @@ class Mamba2Mixer(nn.Module):
             #      unfold → (B,conv_dim,K, k)  ;   we drop the first window (old state)
             windows = full.unfold(-1, k_size, 1)        # (B,conv_dim,windows,k_size)
             traj = windows[..., -K:, :]                 # keep the last K windows
-            traj = traj.permute(2, 0, 1, 3).contiguous()# (K, B, conv_dim, k_size)
-
-            # 3-c)  Assemble a *tuple* of cache objects (cheap shallow copies)
-            caches = ()
-            for t in range(K):
-                c = Mamba2Cache.__new__(Mamba2Cache)   # bypass __init__
-                c.__dict__ = cache_params.__dict__.copy()
-                c.conv_states = cache_params.conv_states.clone()
-                c.ssm_states  = cache_params.ssm_states.clone()
-                c.conv_states[self.layer_idx] = traj[t]
-                c.ssm_states [self.layer_idx] = step_ssm[:, t]
-
-                caches = caches + (c,)
+            traj = traj.permute(0, 2, 1, 3).contiguous()# (B, K, conv_dim, k_size)
 
             # finally update in-place for the *next* bulk call
             cache_params.update_conv_state(
-                self.layer_idx, traj[-1, :, :, :].transpose(1, 2), cache_init=False)
+                self.layer_idx, traj[:, -1, :, :].transpose(1, 2), cache_init=False)
             cache_params.update_ssm_state(
                 self.layer_idx, final_ssm)
 
         # ---------------------------------------------------------------------
         # 4.  Return
         # ---------------------------------------------------------------------
-
-        return y, caches
+        
+        return y, step_ssm, traj
 
     def cuda_kernels_forward(
         self,
@@ -846,7 +834,7 @@ class Mamba2Block(nn.Module):
         hidden_states = residual + hidden_states
 
         if cache_fwd:
-            return hidden_states, caches
+            return hidden_states, caches[0], caches[1] # ssm_step, traj(conv_step)
         else:
             return hidden_states
 
@@ -930,7 +918,8 @@ class Mamba2Output(ModelOutput):
     cache_params: Optional[Mamba2Cache] = None
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
 
-    caches: Optional[Tuple[Tuple[Mamba2Cache]]] = None
+    ssm_steps: Optional[Tuple[torch.FloatTensor]] = None
+    conv_steps: Optional[Tuple[torch.FloatTensor]] = None
 
 @dataclass
 # Copied from transformers.models.mamba.modeling_mamba.MambaCausalLMOutput with Mamba->Mamba2
@@ -960,7 +949,8 @@ class Mamba2CausalLMOutput(ModelOutput):
     cache_params: Optional[Mamba2Cache] = None
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
 
-    caches: Optional[Tuple[Tuple[Mamba2Cache]]] = None
+    ssm_steps: Optional[Tuple[torch.FloatTensor]] = None
+    conv_steps: Optional[Tuple[torch.FloatTensor]] = None
 
 MAMBA2_START_DOCSTRING = r"""
 
@@ -1101,7 +1091,7 @@ class Mamba2Model(Mamba2PreTrainedModel):
 
         hidden_states = inputs_embeds
         all_hidden_states = () if output_hidden_states else None
-        all_caches = ()
+        all_ssm, all_conv = (), ()
         for mixer_block in self.layers:
             if self.gradient_checkpointing and self.training:
                 hidden_states = self._gradient_checkpointing_func(
@@ -1117,8 +1107,9 @@ class Mamba2Model(Mamba2PreTrainedModel):
 
                         cache_fwd=cache_fwd
                     )
-                    hidden_states, caches = out
-                    all_caches = all_caches + (caches,)
+                    hidden_states, ssm_step, conv_step = out
+                    all_ssm = all_ssm + (ssm_step,)
+                    all_conv = all_conv + (conv_step,)
                 else:
                     hidden_states = mixer_block(
                         hidden_states,
@@ -1143,7 +1134,8 @@ class Mamba2Model(Mamba2PreTrainedModel):
             cache_params=cache_params if use_cache else None,
             hidden_states=all_hidden_states,
 
-            caches=all_caches
+            ssm_steps=all_ssm,
+            conv_steps=all_conv,
         )
 
 
@@ -1289,7 +1281,8 @@ class Mamba2ForCausalLM(Mamba2PreTrainedModel, GenerationMixin):
             cache_params=mamba2_outputs.cache_params,
             hidden_states=mamba2_outputs.hidden_states,
 
-            caches=mamba2_outputs.caches # (layers, steps, mamba2_cache)
+            ssm_steps=mamba2_outputs.ssm_steps,
+            conv_steps=mamba2_outputs.conv_steps
         )
 
 __all__ = ["Mamba2ForCausalLM", "Mamba2Model", "Mamba2PreTrainedModel"]

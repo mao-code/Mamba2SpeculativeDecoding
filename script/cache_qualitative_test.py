@@ -133,7 +133,7 @@ if __name__ == "__main__":
     main()
 
     """
-    python -m script.cache_qualitive_test \
+    python -m script.cache_qualitative_test \
         --model_path ./mamba2-2.7b_converted_weights \
         --max_new_tokens 128
     """

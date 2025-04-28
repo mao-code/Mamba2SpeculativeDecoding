@@ -26,7 +26,6 @@ def main():
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--verification", type=str, default="ratio", choices=["ratio", "exact"])
     ap.add_argument("--log", action="store_true", help="Log the verification process")
-    ap.add_argument("--need_vanilla", action="store_true", help="Whether to run vanilla decoding")
     args = ap.parse_args()
 
     device = torch.device(args.device)
