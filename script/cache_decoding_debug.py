@@ -23,7 +23,7 @@ from decoding import mamba_spec_decode_seq, mamba_vanilla_decode
 from transformers import AutoConfig
 from utils import set_random_seed
 
-from decoding import _prune_target_cache
+from decoding import _prune_target_cache, mamba_vanilla_decode
 
 
 def run_draft_test(draft, tok_drf, prompt_ids, gen_ids, max_new_tokens, device):
@@ -37,7 +37,7 @@ def run_draft_test(draft, tok_drf, prompt_ids, gen_ids, max_new_tokens, device):
 
     # Generate token by token and store cache
     for i in range(max_new_tokens):
-        pos = torch.arange(cur_drft_start_pos, cur_drft_end_pos, device=device)
+        pos = torch.tensor([cur_drft_start_pos], device=device) 
         dr_out = draft(
             input_ids=dft_gen_ids[..., cur_drft_start_pos:cur_drft_end_pos],
             cache_params=draft_cache,
@@ -57,17 +57,20 @@ def run_draft_test(draft, tok_drf, prompt_ids, gen_ids, max_new_tokens, device):
         cur_drft_end_pos += 1
 
     # Truncate and rewind the cache
-    new_tokens_len = max_new_tokens - prompt_len
-    truncate_len = new_tokens_len // 2
+    truncate_len = max_new_tokens // 2
     # The draft cache is from prompt_len to prompt_len + new_tokens_len - 1 (The last token is not included)
     draft_cache = draft_hist_caches[-(truncate_len)]
 
-    cur_drft_start_pos = prompt_len + (new_tokens_len - truncate_len)
+    cur_drft_start_pos = prompt_len + (max_new_tokens - truncate_len)
     cur_drft_end_pos = cur_drft_start_pos + 1
-    rewind_gen_ids[0,cur_drft_start_pos] = dft_gen_ids[0,cur_drft_start_pos]
+    rewind_gen_ids[0,:cur_drft_start_pos+1] = dft_gen_ids[0,:cur_drft_start_pos+1]
+
+    print("Length of draft hist cache:", len(draft_hist_caches))
+    print("Draft truncate length:", truncate_len)
+    print("Rewind draft current start position:", cur_drft_start_pos)
     
-    for i in range(truncate_len):
-        pos = torch.arange(cur_drft_start_pos, cur_drft_end_pos, device=device)
+    for i in range(truncate_len-1):
+        pos = torch.tensor([cur_drft_start_pos], device=device)
         dr_out = draft(
             input_ids=rewind_gen_ids[..., cur_drft_start_pos:cur_drft_end_pos],
             cache_params=draft_cache,
@@ -87,13 +90,13 @@ def run_draft_test(draft, tok_drf, prompt_ids, gen_ids, max_new_tokens, device):
         cur_drft_end_pos += 1
 
     # Compare the 2 results
-    print("Compared draft output:")
-    print("Original output:", tok_drf.decode(gen_ids[0, prompt_len:]))
-    print("Rewind output:", tok_drf.decode(rewind_gen_ids[0, prompt_len:]))
+    print("Compared draft output:" + "="*20)
+    print("Original output:", tok_drf.decode(dft_gen_ids[0, :]))
+    print("\nRewind output:", tok_drf.decode(rewind_gen_ids[0, :]))
 
     return dft_gen_ids[0,prompt_len:], rewind_gen_ids[0,prompt_len:]
 
-def run_target_test(target, tok_tgt, prompt_ids, gen_ids, dft_proposed_ids, max_new_tokens, device):
+def run_target_test(target, tok_tgt, prompt_ids, gen_ids, dft_proposed_ids, device):
     print("Running target test...")
     prompt_len = len(prompt_ids[0])
     new_token_len = len(dft_proposed_ids)
@@ -103,7 +106,7 @@ def run_target_test(target, tok_tgt, prompt_ids, gen_ids, dft_proposed_ids, max_
     cur_tgt_start_pos, cur_tgt_end_pos = 0, prompt_len
 
     # Warm up the target model
-    pos  = torch.arange(0, prompt_len-1, device=device)
+    pos = torch.tensor([0], device=device)
     tgt_out = target(
         input_ids=tgt_gen_ids[..., :prompt_len-1],
         use_cache=True, 
@@ -114,7 +117,7 @@ def run_target_test(target, tok_tgt, prompt_ids, gen_ids, dft_proposed_ids, max_
     cur_tgt_start_pos, cur_tgt_end_pos = prompt_len-1, prompt_len
 
     # Cache scan decoding
-    pos = torch.arange(cur_tgt_start_pos, cur_tgt_end_pos+new_token_len, device=device) 
+    pos = torch.tensor([cur_tgt_start_pos], device=device) 
     tgt_out = target(
         input_ids=tgt_gen_ids[..., cur_tgt_start_pos:cur_tgt_end_pos+new_token_len],
         cache_params=tgt_cache,
@@ -127,14 +130,18 @@ def run_target_test(target, tok_tgt, prompt_ids, gen_ids, dft_proposed_ids, max_
     original_output_ids = tgt_out.logits.argmax(-1, keepdim=True).view(-1)  # flatten all dimensions
 
     # Truncate and rewind the cache
-    new_tokens_len = max_new_tokens - prompt_len
-    truncate_len = new_tokens_len // 2
+    truncate_len = new_token_len // 2
     # The target cache is from prompt_len to prompt_len + new_tokens_len (The last token is included)
     _prune_target_cache(tgt_cache, tgt_out.ssm_steps, tgt_out.conv_steps, truncate_len + 1)
 
-    cur_tgt_start_pos = prompt_len + (new_tokens_len - truncate_len)
+    cur_tgt_start_pos = prompt_len + (new_token_len - truncate_len)
+
+    print("Length of target cache:", tgt_out.ssm_steps[0].size(1))
+    print("Target truncate length:", truncate_len)
+    print("Rewind target current start position:", cur_tgt_start_pos)
     
     pos = torch.arange(cur_tgt_start_pos, cur_tgt_end_pos+new_token_len, device=device) 
+    print("Rewind target input: ", tok_tgt.decode(tgt_gen_ids[0, cur_tgt_start_pos:cur_tgt_end_pos+new_token_len]))
     tgt_out = target(
         input_ids=tgt_gen_ids[..., cur_tgt_start_pos:cur_tgt_end_pos+new_token_len],
         cache_params=tgt_cache,
@@ -147,9 +154,9 @@ def run_target_test(target, tok_tgt, prompt_ids, gen_ids, dft_proposed_ids, max_
     rewind_output_ids = tgt_out.logits.argmax(-1, keepdim=True).view(-1)  # flatten all dimensions
 
     # Compare the 2 results
-    print("Compared target output:")
+    print("Compared target output:" + "="*20)
     print("Original output:", tok_tgt.decode(original_output_ids))
-    print("Rewind output:", tok_tgt.decode(rewind_output_ids))
+    print("\nRewind output:", tok_tgt.decode(rewind_output_ids))
 
     return original_output_ids, rewind_output_ids
 
@@ -212,14 +219,41 @@ def main():
     # ------------------- Testing -------------------
     org_dft_out, rew_dft_out = run_draft_test(draft, tok_drf, prompt_ids, gen_ids, args.max_new_tokens, device)
 
-    org_tgt_out, rew_tgt_out = run_target_test(target, tok_tgt, prompt_ids, gen_ids, org_dft_out, args.max_new_tokens, device)
+    org_tgt_out, rew_tgt_out = run_target_test(target, tok_tgt, prompt_ids, gen_ids, org_dft_out, device)
+
+    print("Vanilla output:")
+    vanilla_out = mamba_vanilla_decode(
+        target, prompt_ids, eos_tokens_id=tok_tgt.eos_token_id, max_new=args.max_new_tokens
+    )
+    print(tok_tgt.decode(vanilla_out.view(-1)))
+
+    print("No cache vanilla output:")
+    no_cache_vanilla_output = ""
+    no_cache_vanilla_output_ids = torch.empty(args.max_new_tokens, dtype=torch.long, device=device)
+    input_ids = prompt_ids.clone()
+    for i in range(args.max_new_tokens):    
+        vanilla_out = target(
+            input_ids=input_ids,
+            use_cache=True,
+            return_dict=True,
+        )
+
+        logits = vanilla_out.logits[:, -1, :]
+        probs = torch.nn.functional.softmax(logits, dim=-1)
+
+        next_token = torch.multinomial(probs, num_samples=1)
+        no_cache_vanilla_output_ids[i] = next_token.item()
+
+        input_ids = torch.cat([input_ids, next_token], dim=1)
+        no_cache_vanilla_output += tok_tgt.decode(next_token[0])
+
 
 if __name__ == "__main__":
     main()
 
     """
     Example usage:
-    python cache_decoding_debug.py \
+    python -m script.cache_decoding_debug \
         --target ./mamba2-2.7b_converted_weights \
         --draft  ./mamba2-130m_converted_weights \
         --prompt "I believe the meaning of life is" \

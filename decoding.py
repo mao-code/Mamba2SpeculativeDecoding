@@ -65,7 +65,7 @@ def mamba_spec_decode_seq(
     total_accept_rate, runs = 0.0, 0
 
     # Warm up the target model
-    pos  = torch.arange(0, prompt_len-1, device=device)
+    pos  =  torch.tensor([0], device=device)
     tgt_out = target(
         input_ids=gen_ids[..., :prompt_len-1],
         use_cache=True, 
@@ -96,10 +96,8 @@ def mamba_spec_decode_seq(
         # -------- Draft proposes -----------------------------------------
         draft_hist_caches = []
 
-        # BUG: 感覺問題出在這裡 (輸出很奇怪, qualitative test又表示模型正常)
-        # 每一步的conv state都不一樣，也需要存
         for i in range(corrected_k):
-            pos = torch.arange(cur_drft_start_pos, cur_drft_end_pos, device=device)
+            pos  =  torch.tensor([cur_drft_start_pos], device=device)
             dr_out = draft(
                 input_ids=gen_ids[..., cur_drft_start_pos:cur_drft_end_pos],
                 cache_params=draft_cache,
@@ -127,8 +125,7 @@ def mamba_spec_decode_seq(
             print(f"Gen Ids: ", tokenizer.decode(gen_ids[0, :].tolist()))
 
         # -------- Target verifies *once* ---------------------------------
-        pos = torch.arange(cur_tgt_start_pos, cur_tgt_end_pos+corrected_k, device=device) 
-        # BUG: cache_fwd沒有update conv state和ssm state
+        pos  =  torch.tensor([cur_tgt_start_pos], device=device)
         tgt_out = target(
             input_ids=gen_ids[..., cur_tgt_start_pos:cur_tgt_end_pos+corrected_k],
             cache_params=tgt_cache,
@@ -222,7 +219,7 @@ def mamba_vanilla_decode(
     tgt_cache   = None
 
     # 1. build cache on the *whole* prompt
-    pos  = torch.arange(prompt_len, device=device)
+    pos  = torch.tensor([prompt_len], device=device)
     out  = target(
         input_ids=prompt_ids,
         cache_position=pos,
