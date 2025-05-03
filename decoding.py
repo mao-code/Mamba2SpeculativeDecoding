@@ -16,6 +16,15 @@ from verification import VerificationStrategy, RatioSamplingStrategy, ExactMatch
 #         # target and draft have different length of cache (target has one more token)
 #         cache.ssm_states[l].copy_(st[:, -num_tokens_to_prune, :, :, :])      
 
+def snapshot_states(cache):
+    """
+    Return two tuples containing *clone()s* of every layer's
+    SSM-state and conv-state.  No grad, no view ⇒ deepcopy-proof.
+    """
+    ssm_snap  = tuple(t.clone() for t in cache.ssm_states)
+    conv_snap = tuple(t.clone() for t in cache.conv_states)
+    return ssm_snap, conv_snap
+
 def _prune_target_cache(cache, ssm_steps, conv_steps, num_tokens_to_prune):
     assert num_tokens_to_prune > 0, "num_tokens_to_prune must be greater than 0"
 
