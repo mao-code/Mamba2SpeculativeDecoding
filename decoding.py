@@ -206,46 +206,101 @@ def mamba_spec_decode_seq(
 
     return gen_ids[:, prompt_len:]     # new tokens only
 
+# @torch.inference_mode()
+# def mamba_vanilla_decode(
+#     target: Mamba2ForCausalLM,
+#     prompt_ids: torch.Tensor,
+#     eos_tokens_id: int = 1,
+#     max_new: int = 256
+# ):
+#     device      = prompt_ids.device
+#     prompt_len  = prompt_ids.size(1)
+#     gen_ids     = [prompt_ids]                        
+#     tgt_cache   = None
+
+#     # 1. build cache on the *whole* prompt
+#     pos  = torch.tensor([prompt_len], device=device)
+#     out  = target(
+#         input_ids=prompt_ids,
+#         cache_position=pos,
+#         use_cache=True
+#     )
+#     tgt_cache = out.cache_params
+
+#     cur_pos = prompt_len
+#     for _ in range(max_new):
+#         # 2. feed exactly one token
+#         tok = gen_ids[-1][:, -1:]
+#         pos = torch.tensor([cur_pos-1], device=device)
+
+#         out = target(
+#             input_ids=tok,
+#             cache_params=tgt_cache,
+#             cache_position=pos,
+#             use_cache=True
+#         )
+#         tgt_cache = out.cache_params
+
+#         next_tok = out.logits[:, -1, :].argmax(-1, keepdim=True)
+#         if next_tok.item() == eos_tokens_id:
+#             break
+
+#         gen_ids.append(next_tok)
+#         cur_pos += 1
+
+#     return torch.cat(gen_ids, dim=1)[:, prompt_len:]
+
 @torch.inference_mode()
 def mamba_vanilla_decode(
-    target: Mamba2ForCausalLM,
+    model: Mamba2ForCausalLM,
     prompt_ids: torch.Tensor,
-    eos_tokens_id: int = 1,
-    max_new: int = 256
+    eos_id: int,
+    max_new: int = 256,
 ):
     device      = prompt_ids.device
     prompt_len  = prompt_ids.size(1)
-    gen_ids     = [prompt_ids]                        
-    tgt_cache   = None
 
-    # 1. build cache on the *whole* prompt
-    pos  = torch.tensor([prompt_len], device=device)
-    out  = target(
-        input_ids=prompt_ids,
-        cache_position=pos,
-        use_cache=True
-    )
-    tgt_cache = out.cache_params
-
-    cur_pos = prompt_len
-    for _ in range(max_new):
-        # 2. feed exactly one token
-        tok = gen_ids[-1][:, -1:]
-        pos = torch.tensor([cur_pos-1], device=device)
-
-        out = target(
-            input_ids=tok,
-            cache_params=tgt_cache,
-            cache_position=pos,
-            use_cache=True
+    # 1. Prefill on prompt except the *last* token
+    if prompt_len > 1:
+        out = model(
+            input_ids=prompt_ids[:, :-1],
+            use_cache=True,                # build cache
+            return_dict=True,
+            cache_position=torch.tensor([0], device=device)  # first token starts at 0
         )
-        tgt_cache = out.cache_params
+        cache = out.cache_params
+        cur_pos = prompt_len - 1          # position of the still-unseen last prompt token
+        next_input = prompt_ids[:, -1:]   # that last token
+    else:                                 # 1-token prompt
+        cache = None
+        cur_pos = 0
+        next_input = prompt_ids
 
-        next_tok = out.logits[:, -1, :].argmax(-1, keepdim=True)
-        if next_tok.item() == eos_tokens_id:
+    generated = []
+
+    # 2. Incremental generation
+    for _ in range(max_new):
+        out = model(
+            input_ids=next_input,          # exactly one token
+            cache_params=cache,
+            use_cache=True,
+            return_dict=True,
+            cache_position=torch.tensor([cur_pos], device=device)
+        )
+        cache = out.cache_params
+        logits = out.logits[:, -1, :]
+        next_token = logits.argmax(-1, keepdim=True)
+
+        if next_token.item() == eos_id:
             break
 
-        gen_ids.append(next_tok)
+        generated.append(next_token)
+        next_input = next_token
         cur_pos += 1
 
-    return torch.cat(gen_ids, dim=1)[:, prompt_len:]
+    if generated:
+        generated = torch.cat(generated, dim=1)
+    else:                                  # stopped at EOS immediately
+        generated = torch.empty(1, 0, dtype=torch.long, device=device)
+
+    return generated

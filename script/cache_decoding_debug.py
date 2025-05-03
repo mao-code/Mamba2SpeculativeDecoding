@@ -27,35 +27,56 @@ from decoding import _prune_target_cache, mamba_vanilla_decode
 
 
 def run_draft_test(draft, tok_drf, prompt_ids, gen_ids, max_new_tokens, device):
-    print("Running draft test...")
-    draft_hist_caches = []
-    prompt_len = len(prompt_ids[0])
-    cur_drft_start_pos, cur_drft_end_pos = 0, prompt_len
-    dft_gen_ids = gen_ids.clone()
-    rewind_gen_ids = gen_ids.clone()
-    draft_cache = None
-
-    # Generate token by token and store cache
-    for i in range(max_new_tokens):
-        pos = torch.tensor([cur_drft_start_pos], device=device) 
-        dr_out = draft(
-            input_ids=dft_gen_ids[..., cur_drft_start_pos:cur_drft_end_pos],
-            cache_params=draft_cache,
-            use_cache=True,  
+    print("Running draft test..."+ "="*20)
+    prompt_len = prompt_ids.size(1)
+    # ------------------------------------------------------
+    # (A)  Prefill **up to the penultimate** prompt token
+    # ------------------------------------------------------
+    if prompt_len > 1:
+        draft_out = draft(
+            input_ids=prompt_ids[:, :-1],
+            use_cache=True,
             return_dict=True,
-            cache_position=pos
+            cache_position=torch.tensor([0], device=device)
         )
-        draft_cache = dr_out.cache_params
+        draft_cache = draft_out.cache_params
+        cur_pos = prompt_len - 1
+        next_input = prompt_ids[:, -1:]         # the last prompt token
+    else:                                       # 1-token prompt
+        draft_cache = None
+        cur_pos = 0
+        next_input = prompt_ids
 
-        draft_logits  = dr_out.logits[:, -1, :] 
-        next_tok     = draft_logits.argmax(-1, keepdim=True)   # greedy draft
+    dft_gen_ids = gen_ids.clone()                   # working buffer
+    draft_hist_caches = []
+
+    # ------------------------------------------------------
+    # (B)  Incremental generation
+    # ------------------------------------------------------
+    for _ in range(max_new_tokens):
+        draft_out = draft(
+            input_ids=next_input,               # exactly one token
+            cache_params=draft_cache,
+            use_cache=True,
+            return_dict=True,
+            cache_position=torch.tensor([cur_pos], device=device)
+        )
+        draft_cache = draft_out.cache_params
+        logits = draft_out.logits[:, -1, :]
+        next_tok = logits.argmax(-1, keepdim=True)
 
         draft_hist_caches.append(draft_cache)
-        dft_gen_ids[0, cur_drft_end_pos] = next_tok.squeeze(-1)
+        dft_gen_ids[0, cur_pos] = next_input.item()       # record token
+        dft_gen_ids[0, cur_pos + 1] = next_tok.item()
 
-        cur_drft_start_pos = cur_drft_end_pos
-        cur_drft_end_pos += 1
+        # set up next step
+        next_input = next_tok
+        cur_pos += 1
 
+    # ------------------------------------------------------
+    # (C)  Rewind the cache and generate the output again
+    # ------------------------------------------------------
+    rewind_gen_ids = gen_ids.clone()                 
     # Truncate and rewind the cache
     truncate_len = max_new_tokens // 2
     # The draft cache is from prompt_len to prompt_len + new_tokens_len - 1 (The last token is not included)
@@ -90,60 +111,70 @@ def run_draft_test(draft, tok_drf, prompt_ids, gen_ids, max_new_tokens, device):
         cur_drft_end_pos += 1
 
     # Compare the 2 results
-    print("Compared draft output:" + "="*20)
+    print("Compared draft output:")
     print("Original output:", tok_drf.decode(dft_gen_ids[0, :]))
     print("\nRewind output:", tok_drf.decode(rewind_gen_ids[0, :]))
 
     return dft_gen_ids[0,prompt_len:], rewind_gen_ids[0,prompt_len:]
 
 def run_target_test(target, tok_tgt, prompt_ids, gen_ids, dft_proposed_ids, device):
-    print("Running target test...")
-    prompt_len = len(prompt_ids[0])
+    print("Running target test..." + "="*20)
+    prompt_len = prompt_ids.size(1)
     new_token_len = len(dft_proposed_ids)
+
     tgt_gen_ids = gen_ids.clone()
-    tgt_gen_ids[0, prompt_len:prompt_len+new_token_len] = dft_proposed_ids
+    tgt_gen_ids[0, prompt_len:prompt_len + new_token_len] = dft_proposed_ids
 
-    cur_tgt_start_pos, cur_tgt_end_pos = 0, prompt_len
+    # ------------------------------------------------------
+    # (A) Prefill up to penultimate prompt token
+    # ------------------------------------------------------
+    if prompt_len > 1:
+        out = target(
+            input_ids=prompt_ids[:, :-1],
+            use_cache=True,
+            return_dict=True,
+            cache_position=torch.tensor([0], device=device)
+        )
+        tgt_cache = out.cache_params
+        cur_pos = prompt_len - 1
+    else:
+        tgt_cache = None
+        cur_pos = 0
 
-    # Warm up the target model
-    pos = torch.tensor([0], device=device)
-    tgt_out = target(
-        input_ids=tgt_gen_ids[..., :prompt_len-1],
-        use_cache=True, 
-        return_dict=True, 
-        cache_position = pos
-    )
-    tgt_cache = tgt_out.cache_params
-    cur_tgt_start_pos, cur_tgt_end_pos = prompt_len-1, prompt_len
-
-    # Cache scan decoding
-    pos = torch.tensor([cur_tgt_start_pos], device=device) 
-    tgt_out = target(
-        input_ids=tgt_gen_ids[..., cur_tgt_start_pos:cur_tgt_end_pos+new_token_len],
+    # ------------------------------------------------------
+    # (B) Feed the whole "prompt + proposals" *once*
+    #     (cache_fwd == True does the K-token scan)
+    # ------------------------------------------------------
+    pos = torch.tensor([cur_pos], device=device)
+    out = target(
+        input_ids=tgt_gen_ids[:, cur_pos: prompt_len + new_token_len],
         cache_params=tgt_cache,
-        use_cache=True, 
+        use_cache=True,
         cache_fwd=True,
-        return_dict=True, 
-        cache_position = pos
+        return_dict=True,
+        cache_position=pos
     )
-    tgt_cache = tgt_out.cache_params
-    original_output_ids = tgt_out.logits.argmax(-1, keepdim=True).view(-1)  # flatten all dimensions
+    tgt_cache = out.cache_params                 
+    original_output_ids = out.logits.argmax(-1, keepdim=True).view(-1)
 
+    # ------------------------------------------------------
+    # (C) Rewind the cache and generate the output again
+    # ------------------------------------------------------
     # Truncate and rewind the cache
     truncate_len = new_token_len // 2
     # The target cache is from prompt_len to prompt_len + new_tokens_len (The last token is included)
     _prune_target_cache(tgt_cache, tgt_out.ssm_steps, tgt_out.conv_steps, truncate_len + 1)
 
-    cur_tgt_start_pos = prompt_len + (new_token_len - truncate_len)
+    cur_pos = prompt_len + (new_token_len - truncate_len)
 
     print("Length of target cache:", tgt_out.ssm_steps[0].size(1))
     print("Target truncate length:", truncate_len)
-    print("Rewind target current start position:", cur_tgt_start_pos)
+    print("Rewind target current position:", cur_pos)
     
-    pos = torch.arange(cur_tgt_start_pos, cur_tgt_end_pos+new_token_len, device=device) 
-    print("Rewind target input: ", tok_tgt.decode(tgt_gen_ids[0, cur_tgt_start_pos:cur_tgt_end_pos+new_token_len]))
+    pos = torch.arange(cur_pos, prompt_len+new_token_len, device=device) 
+    print("Rewind target input: ", tok_tgt.decode(tgt_gen_ids[0, cur_pos:prompt_len+new_token_len]))
     tgt_out = target(
-        input_ids=tgt_gen_ids[..., cur_tgt_start_pos:cur_tgt_end_pos+new_token_len],
+        input_ids=tgt_gen_ids[..., cur_pos:prompt_len+new_token_len],
         cache_params=tgt_cache,
         use_cache=True, 
         cache_fwd=True,
@@ -154,7 +185,7 @@ def run_target_test(target, tok_tgt, prompt_ids, gen_ids, dft_proposed_ids, devi
     rewind_output_ids = tgt_out.logits.argmax(-1, keepdim=True).view(-1)  # flatten all dimensions
 
     # Compare the 2 results
-    print("Compared target output:" + "="*20)
+    print("Compared target output:")
     print("Original output:", tok_tgt.decode(original_output_ids))
     print("\nRewind output:", tok_tgt.decode(rewind_output_ids))
 
@@ -221,13 +252,13 @@ def main():
 
     org_tgt_out, rew_tgt_out = run_target_test(target, tok_tgt, prompt_ids, gen_ids, org_dft_out, device)
 
-    print("Vanilla output:")
+    print("Vanilla output with cache store: (target model)" + "="*20)
     vanilla_out = mamba_vanilla_decode(
-        target, prompt_ids, eos_tokens_id=tok_tgt.eos_token_id, max_new=args.max_new_tokens
+        target, prompt_ids, eos_id=tok_tgt.eos_token_id, max_new=args.max_new_tokens
     )
     print(tok_tgt.decode(vanilla_out.view(-1)))
 
-    print("No cache vanilla output:")
+    print("Vanilla output without cache store: (target model)" + "="*20)
     no_cache_vanilla_output = ""
     no_cache_vanilla_output_ids = torch.empty(args.max_new_tokens, dtype=torch.long, device=device)
     input_ids = prompt_ids.clone()
@@ -239,14 +270,19 @@ def main():
         )
 
         logits = vanilla_out.logits[:, -1, :]
-        probs = torch.nn.functional.softmax(logits, dim=-1)
 
-        next_token = torch.multinomial(probs, num_samples=1)
+        # Sampling
+        # probs = torch.nn.functional.softmax(logits, dim=-1)
+        # next_token = torch.multinomial(probs, num_samples=1)
+
+        # Greedy
+        next_token = logits.argmax(-1, keepdim=True)   # greedy draft
+
         no_cache_vanilla_output_ids[i] = next_token.item()
-
         input_ids = torch.cat([input_ids, next_token], dim=1)
         no_cache_vanilla_output += tok_tgt.decode(next_token[0])
 
+    print(no_cache_vanilla_output)
 
 if __name__ == "__main__":
     main()
