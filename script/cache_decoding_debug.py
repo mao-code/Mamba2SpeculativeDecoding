@@ -330,9 +330,10 @@ if __name__ == "__main__":
 
     """
     Example usage:
+
     python -m script.cache_decoding_debug \
         --target ./mamba2-2.7b_converted_weights \
-        --draft  ./mamba2-130m_converted_weights \
+        --draft  ./mamba2-780m_converted_weights \
         --prompt "I believe the meaning of life is" \
         --max_new_tokens 32
     """

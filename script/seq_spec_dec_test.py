@@ -23,7 +23,7 @@ def main():
     ap.add_argument("--prompt",  default="I believe the meaning of life is")
     ap.add_argument("--new-tokens", type=int, default=128)
     ap.add_argument("--K",           type=int, default=8)
-    ap.add_argument("--temperature", type=float, default=0.0)
+    ap.add_argument("--sampling",   type=str, default="greedy", choices=["greedy", "top_k", "top_p"])
     ap.add_argument("--verification", type=str, default="ratio", choices=["ratio", "exact"])
     ap.add_argument("--log", action="store_true", help="Log the verification process")
     args = ap.parse_args()
@@ -73,7 +73,7 @@ def main():
 
     # --- vanilla ----------------------------------------------------------
     out_vanilla, t_vanilla = timed(
-        mamba_vanilla_decode, target, prompt_ids, eos_tokens_id=tok_tgt.eos_token_id, max_new=args.new_tokens
+        mamba_vanilla_decode, target, prompt_ids, eos_id=tok_tgt.eos_token_id, max_new=args.new_tokens, sampling=args.sampling
     )
     out_vanilla_text = tok_tgt.decode(out_vanilla.view(-1))
     print("Vanilla output:", out_vanilla_text)
@@ -88,7 +88,7 @@ def main():
 
     out_spec, t_spec = timed(
         mamba_spec_decode_seq, target, draft, prompt_ids, pad_token_id=tok_tgt.pad_token_id, K=args.K, max_new=args.new_tokens, verification_strategy=verification_strategy,
-        log=args.log, tokenizer=tok_tgt
+        log=args.log, tokenizer=tok_tgt, draft_sampling=args.sampling
     )
     out_spec_text = tok_tgt.decode(out_spec.view(-1))
     print("Speculative output:", out_spec_text)
@@ -120,9 +120,12 @@ if __name__ == "__main__":
 
     python -m script.seq_spec_dec_test \
     --target ./mamba2-2.7b_converted_weights \
-    --draft  ./mamba2-130m_converted_weights \
+    --draft  ./mamba2-370m_converted_weights \
     --prompt "I believe the meaning of life is" \
-    --K 3 --new-tokens 64 --device cuda:0 \
+    --K 3 \
+    --new-tokens 64 \
+    --device cuda:0 \
     --verification exact \
+    --sampling topk \
     --log
     """
