@@ -261,6 +261,7 @@ def main():
 
     org_tgt_out, rew_tgt_out = run_target_test(target, tok_tgt, prompt_ids, gen_ids, org_dft_out, device)
 
+    # TODO: Use cache fwd
     print("Vanilla output with cache store: (target model)" + "="*20)
     vanilla_out = mamba_vanilla_decode(
         target, prompt_ids, eos_id=tok_tgt.eos_token_id, max_new=args.max_new_tokens

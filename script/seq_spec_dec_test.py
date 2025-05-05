@@ -73,7 +73,7 @@ def main():
 
     # --- vanilla ----------------------------------------------------------
     out_vanilla, t_vanilla = timed(
-        mamba_vanilla_decode, target, prompt_ids, eos_id=tok_tgt.eos_token_id, max_new=args.new_tokens, sampling=args.sampling
+        mamba_vanilla_decode, target, prompt_ids, eos_id=tok_tgt.eos_token_id, max_new=args.new_tokens, sampling=args.sampling, tokenizer=tok_tgt
     )
     out_vanilla_text = tok_tgt.decode(out_vanilla.view(-1))
     print("Vanilla output:", out_vanilla_text)
@@ -126,6 +126,6 @@ if __name__ == "__main__":
     --new-tokens 64 \
     --device cuda:0 \
     --verification exact \
-    --sampling top_k \
+    --sampling greedy \
     --log
     """

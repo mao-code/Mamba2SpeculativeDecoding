@@ -3,7 +3,9 @@ import torch.nn.functional as F
 from typing import Optional, Tuple, List
 from Mamba2.modeling_mamba2 import Mamba2ForCausalLM, Mamba2Cache
 from verification import VerificationStrategy, RatioSamplingStrategy, ExactMatchStrategy
+from utils import set_random_seed
 
+set_random_seed(42)
 
 def sample_token(
     logits: torch.Tensor,
@@ -58,13 +60,11 @@ def sample_token(
     next_token = torch.multinomial(probs_nucleus, num_samples=1)
     return sorted_indices.gather(-1, next_token)
 
-
 def snapshot_states(cache):
     """Deep-copy-safe snapshot of SSM/conv states for each layer."""
     ssm_snap = tuple(t.clone() for t in cache.ssm_states)
     conv_snap = tuple(t.clone() for t in cache.conv_states)
     return ssm_snap, conv_snap
-
 
 def _prune_target_cache(cache, ssm_steps, conv_steps, num_tokens_to_prune):
     if num_tokens_to_prune <= 0:
@@ -72,7 +72,6 @@ def _prune_target_cache(cache, ssm_steps, conv_steps, num_tokens_to_prune):
     for l, (ssm, conv) in enumerate(zip(ssm_steps, conv_steps)):
         cache.ssm_states[l].copy_(ssm[:, -num_tokens_to_prune, :, :, :])
         cache.conv_states[l].copy_(conv[:, -num_tokens_to_prune, :, :])
-
 
 # ----------------------- Speculative decoding ----------------------------
 @torch.inference_mode()
@@ -115,6 +114,8 @@ def mamba_spec_decode_seq(
     )
     tgt_cache = tgt_out.cache_params
     cur_tgt_start_pos, cur_tgt_end_pos = prompt_len - 1, prompt_len
+
+    print("Warm-up token of the target model: ", tokenizer.decode(tgt_out.logits[0, -1, :].argmax().item()))
 
     total_accept_rate, runs = 0.0, 0
 
@@ -180,6 +181,9 @@ def mamba_spec_decode_seq(
         p_buffer = target_draft_prob.gather(-1, draft_tok_buffer.unsqueeze(-1)).squeeze(-1)
         tgt_token_buffer = target_draft_logits.argmax(-1)
 
+        if log and tokenizer is not None:
+            print(f"[Iter {runs:3d}] Target tokens: ", tokenizer.decode(tgt_token_buffer[0].tolist()))
+
         good, m = verification_strategy.verify(
             draft_tok_buffer, q_buffer, p_buffer, target_draft_logits
         )
@@ -201,6 +205,9 @@ def mamba_spec_decode_seq(
                 tgt_cache, tgt_out.ssm_steps, tgt_out.conv_steps, corrected_k - m + 1
             )
 
+        if log and tokenizer is not None:
+            print(f"Current gen_ids: ", tokenizer.decode(gen_ids[0, :cur_tgt_end_pos + corrected_k].tolist()))
+
         cur_tgt_end_pos += m + 1
         cur_tgt_start_pos = cur_tgt_end_pos - 1
         cur_drft_start_pos = cur_tgt_start_pos
@@ -218,6 +225,7 @@ def mamba_vanilla_decode(
     model: Mamba2ForCausalLM,
     prompt_ids: torch.Tensor,
     eos_id: int,
+    tokenizer=None,
     max_new: int = 256,
     sampling: str = "greedy",  # 'greedy' | 'top_k' | 'top_p'
     top_k: int = 50,
@@ -238,6 +246,8 @@ def mamba_vanilla_decode(
         cache = out.cache_params
         cur_pos = prompt_len - 1
         next_input = prompt_ids[:, -1:]
+
+        print("Warm-up token of the target model: ", tokenizer.decode(out.logits[0, -1, :].argmax().item()))
     else:
         cache = None
         cur_pos = 0
