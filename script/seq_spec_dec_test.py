@@ -120,7 +120,7 @@ if __name__ == "__main__":
 
     python -m script.seq_spec_dec_test \
     --target ./mamba2-2.7b_converted_weights \
-    --draft  ./mamba2-370m_converted_weights \
+    --draft  ./mamba2-130m_converted_weights \
     --prompt "I believe the meaning of life is" \
     --K 3 \
     --new-tokens 64 \

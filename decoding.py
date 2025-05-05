@@ -115,8 +115,6 @@ def mamba_spec_decode_seq(
     tgt_cache = tgt_out.cache_params
     cur_tgt_start_pos, cur_tgt_end_pos = prompt_len - 1, prompt_len
 
-    print("Warm-up token of the target model: ", tokenizer.decode(tgt_out.logits[0, -1, :].argmax().item()))
-
     total_accept_rate, runs = 0.0, 0
 
     while cur_tgt_end_pos < total_len:
@@ -246,8 +244,6 @@ def mamba_vanilla_decode(
         cache = out.cache_params
         cur_pos = prompt_len - 1
         next_input = prompt_ids[:, -1:]
-
-        print("Warm-up token of the target model: ", tokenizer.decode(out.logits[0, -1, :].argmax().item()))
     else:
         cache = None
         cur_pos = 0
