@@ -17,8 +17,8 @@ def sample_token(
     Args:
         logits (torch.Tensor): Logits for the last position, shape (B, vocab).
         method (str): 'greedy', 'top_k', or 'top_p'.
-        top_k (int): K value for top‑K sampling (ignored if method != 'top_k').
-        top_p (float): Cumulative probability threshold for top‑p sampling (ignored if method != 'top_p').
+        top_k (int): K value for top-K sampling (ignored if method != 'top_k').
+        top_p (float): Cumulative probability threshold for top-p sampling (ignored if method != 'top_p').
         temperature (float): Softmax temperature (>0). 1 ⇒ no scaling.
 
     Returns:
@@ -60,7 +60,7 @@ def sample_token(
 
 
 def snapshot_states(cache):
-    """Deep‑copy‑safe snapshot of SSM/conv states for each layer."""
+    """Deep-copy-safe snapshot of SSM/conv states for each layer."""
     ssm_snap = tuple(t.clone() for t in cache.ssm_states)
     conv_snap = tuple(t.clone() for t in cache.conv_states)
     return ssm_snap, conv_snap
@@ -188,8 +188,9 @@ def mamba_spec_decode_seq(
         # ---------------- Commit tokens & cache bookkeeping ----------
         if m == corrected_k:
             if cur_tgt_end_pos + corrected_k < total_len:
-                last_tgt_token = tgt_out.logits[:, corrected_k, :].argmax(-1)[0]
-                gen_ids[0, cur_tgt_end_pos + corrected_k] = last_tgt_token
+                next_token_logits = tgt_out.logits[:, corrected_k, :]
+                next_tgt_token = sample_token(next_token_logits, method=draft_sampling, temperature=draft_temperature)
+                gen_ids[0, cur_tgt_end_pos + corrected_k] = next_tgt_token
         else:
             gen_ids[0, cur_tgt_end_pos + m] = tgt_token_buffer[0, m]
             gen_ids[0, cur_tgt_end_pos + m + 1 : cur_tgt_end_pos + corrected_k] = pad_token_id
@@ -206,8 +207,7 @@ def mamba_spec_decode_seq(
         cur_drft_end_pos = cur_tgt_end_pos
 
     avg_rate = total_accept_rate / runs if runs else 0.0
-    if log:
-        print(f"Average acceptance rate: {avg_rate:.3f}")
+    print(f"Average acceptance rate: {avg_rate:.3f}")
 
     return gen_ids[:, prompt_len:]
 

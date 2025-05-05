@@ -126,6 +126,6 @@ if __name__ == "__main__":
     --new-tokens 64 \
     --device cuda:0 \
     --verification exact \
-    --sampling topk \
+    --sampling top_k \
     --log
     """
