@@ -7,8 +7,8 @@ import argparse
 from utils import set_random_seed
 import torch
 from transformers import AutoTokenizer, AutoConfig
-from mamba2.modeling_mamba2 import Mamba2ForCausalLM
-from mamba2.utils import snapshot_states
+from Mamba2.modeling_mamba2 import Mamba2ForCausalLM
+from decoding import snapshot_states
 
 def main():
     ap = argparse.ArgumentParser()
@@ -48,7 +48,7 @@ def main():
 
     with torch.no_grad():
         for prompt in prompts:
-            print("Prompt:", prompt)
+            print("Prompt: "+prompt+"="*20)
             encoding = tok(
                 prompt,
                 return_tensors="pt",
@@ -67,11 +67,12 @@ def main():
             cache = pre_out.cache_params
             last_idx = len(input_ids[0])-1
             orig_ssm, orig_conv = snapshot_states(cache)
+            last_token = input_ids[:, -1:].to(device)
 
             # Forward normally (vanilla auto-regressive decoding)
-            print("Vanilla decoding...")
+            # print("Vanilla decoding...")
             vanilla_out = model(
-                input_ids=input_ids,
+                input_ids=last_token,
                 cache_params=cache,
                 use_cache=True,
                 return_dict=True,
@@ -87,9 +88,9 @@ def main():
     
 
             # Forward with cache and parallel scan (cache scan kernel)
-            print("Cache scan decoding...")
+            # print("Cache scan decoding...")
             cache_out = model(
-                input_ids=input_ids,
+                input_ids=last_token,
                 cache_params=cache,
                 use_cache=True,
                 cache_fwd=True,
@@ -105,6 +106,6 @@ if __name__ == "__main__":
     """
     Example usage:
 
-    python -m script.cache_decoding_debug \
+    python -m script.cache_scan_debug \
         --model ./mamba2-2.7b_converted_weights 
     """

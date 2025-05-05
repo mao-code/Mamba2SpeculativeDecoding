@@ -319,7 +319,8 @@ class Mamba2Mixer(nn.Module):
 
         # ---------------------------------------------------------------------
         # 1.  Linear projection and causal-conv on the *whole* block
-        # ---------------------------------------------------------------------
+        # ---------------------------------------------------------------------\
+        hidden_states = apply_mask_to_padding_states(hidden_states, attention_mask)
         proj = self.in_proj(hidden_states) # (B,K,proj_dim)
         gts = self.n_groups * self.ssm_state_size # groups time state size
         d_mlp = (proj.size(-1) - 2*self.intermediate_size - 2*gts - self.num_heads) // 2
@@ -329,21 +330,29 @@ class Mamba2Mixer(nn.Module):
             self.num_heads], dim=-1
         )
 
-        xBC = apply_mask_to_padding_states(xBC, attention_mask)
+        # xBC = apply_mask_to_padding_states(xBC, attention_mask)
 
-        if self.activation not in {"silu", "swish"}:
-            xBC_conv = self.act(self.conv1d(xBC.transpose(1,2))[...,:K].transpose(1,2))
-        else:
-            xBC_conv = causal_conv1d_fn(
-                xBC.transpose(1,2),
-                self.conv1d.weight.squeeze(1),
-                self.conv1d.bias,
-                activation=self.activation
-            ).transpose(1,2)
-        xBC_conv = apply_mask_to_padding_states(xBC_conv, attention_mask)
+        # Call the streaming kernel (channel‑first layout!)
+        xBC_conv = causal_conv1d_update(
+            xBC.transpose(1, 2),                     # -> (B, conv_dim, K)
+            cache_params.conv_states[self.layer_idx],# ring buffer (B, conv_dim, k_size‑1)
+            self.conv1d.weight.squeeze(1),           # (conv_dim, k_size)
+            self.conv1d.bias,
+            activation=self.activation
+        ).transpose(1, 2)                            # back to (B, K, conv_dim)
 
-        h, B_mat, C_mat = torch.split(
-            xBC_conv, [self.intermediate_size, gts, gts], dim=-1)
+        # if self.activation not in {"silu", "swish"}:
+        #     xBC_conv = self.act(self.conv1d(xBC.transpose(1,2))[...,:K].transpose(1,2))
+        # else:
+        #     xBC_conv = causal_conv1d_fn(
+        #         xBC.transpose(1,2),
+        #         self.conv1d.weight.squeeze(1),
+        #         self.conv1d.bias,
+        #         activation=self.activation
+        #     ).transpose(1,2)
+        # xBC_conv = apply_mask_to_padding_states(xBC_conv, attention_mask)
+
+        h, B_mat, C_mat = torch.split(xBC_conv, [self.intermediate_size, gts, gts], dim=-1)
 
 
         # ---------------------------------------------------------------------
