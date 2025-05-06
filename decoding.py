@@ -5,8 +5,6 @@ from Mamba2.modeling_mamba2 import Mamba2ForCausalLM, Mamba2Cache
 from verification import VerificationStrategy, RatioSamplingStrategy, ExactMatchStrategy
 from utils import set_random_seed
 
-set_random_seed(42)
-
 def sample_token(
     logits: torch.Tensor,
     method: str = "greedy",
