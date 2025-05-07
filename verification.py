@@ -4,6 +4,7 @@ import torch
 
 Tensor = torch.Tensor
 
+# TODO: accept target token ids, not the logits to adapt to different sampling strategy
 # Verification interface
 class VerificationStrategy(ABC):
     @abstractmethod

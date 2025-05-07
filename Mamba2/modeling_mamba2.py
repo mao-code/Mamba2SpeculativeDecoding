@@ -372,9 +372,9 @@ class Mamba2Mixer(nn.Module):
         y_ssm, final_ssm, step_ssm = mamba_chunk_scan_combined(
             h_ssm, dt, A, B_mat, C_mat,
             chunk_size = 1,                       # return every step
-            D          = self.D,
-            z          = None,
-            dt_bias    = self.dt_bias,
+            D = self.D,
+            z = None,
+            dt_bias = self.dt_bias,
             initial_states = prev_ssm,
             return_all_states = True,
             return_final_states = True,

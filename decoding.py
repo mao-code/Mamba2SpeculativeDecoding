@@ -80,7 +80,7 @@ def mamba_spec_decode_seq(
     pad_token_id: int = 0,
     K: int = 3,
     max_new: int = 256,
-    verification_strategy: VerificationStrategy = RatioSamplingStrategy(),
+    verification_strategy: VerificationStrategy = ExactMatchStrategy(),
     draft_sampling: str = "greedy",  # 'greedy' | 'top_k' | 'top_p'
     draft_top_k: int = 50,
     draft_top_p: float = 0.9,
@@ -105,7 +105,7 @@ def mamba_spec_decode_seq(
 
     # --- Warm‑up target cache on prompt−1 tokens
     tgt_out = target(
-        input_ids=gen_ids[..., : prompt_len - 1],
+        input_ids=gen_ids[:, : prompt_len - 1],
         use_cache=True,
         return_dict=True,
         cache_position=torch.tensor([0], device=device),
@@ -117,8 +117,7 @@ def mamba_spec_decode_seq(
 
     while cur_tgt_end_pos < total_len:
         runs += 1
-        seq_len = cur_tgt_end_pos
-        corrected_k = min(K, total_len - seq_len)
+        corrected_k = min(K, total_len - cur_tgt_end_pos)
 
         draft_tok_buffer = torch.empty(1, corrected_k, dtype=torch.long, device=device)
         q_buffer = torch.empty(1, corrected_k, dtype=torch.float, device=device)
@@ -175,14 +174,12 @@ def mamba_spec_decode_seq(
         target_draft_logits = tgt_out.logits[:, :corrected_k, :]
         target_draft_prob = F.softmax(target_draft_logits, dim=-1)
         p_buffer = target_draft_prob.gather(-1, draft_tok_buffer.unsqueeze(-1)).squeeze(-1)
-        tgt_token_buffer = target_draft_logits.argmax(-1)
 
         if log and tokenizer is not None:
-            print(f"[Iter {runs:3d}] Target tokens: ", tokenizer.decode(tgt_token_buffer[0].tolist()))
+            all_target_token = tgt_out.logits.argmax(-1, keepdim=True).view(-1)
+            print(f"[Iter {runs:3d}] Target tokens: ", tokenizer.decode(all_target_token))
 
-        good, m = verification_strategy.verify(
-            draft_tok_buffer, q_buffer, p_buffer, target_draft_logits
-        )
+        good, m = verification_strategy.verify(draft_tok_buffer, q_buffer, p_buffer, target_draft_logits)
         total_accept_rate += m / K
 
         # ---------------- Commit tokens & cache bookkeeping ----------
@@ -192,14 +189,20 @@ def mamba_spec_decode_seq(
                 next_tgt_token = sample_token(next_token_logits, method=draft_sampling, temperature=draft_temperature)
                 gen_ids[0, cur_tgt_end_pos + corrected_k] = next_tgt_token
         else:
-            gen_ids[0, cur_tgt_end_pos + m] = tgt_token_buffer[0, m]
+            next_token_logits = tgt_out.logits[:, m, :]
+            next_tgt_token = sample_token(
+                next_token_logits,
+                method=draft_sampling,
+                top_k=draft_top_k,
+                top_p=draft_top_p,
+                temperature=draft_temperature
+            )
+            gen_ids[0, cur_tgt_end_pos + m] = next_tgt_token
             gen_ids[0, cur_tgt_end_pos + m + 1 : cur_tgt_end_pos + corrected_k] = pad_token_id
 
             draft_cache.ssm_states = ssm_hist[-(corrected_k - m)]
             draft_cache.conv_states = conv_hist[-(corrected_k - m)]
-            _prune_target_cache(
-                tgt_cache, tgt_out.ssm_steps, tgt_out.conv_steps, corrected_k - m + 1
-            )
+            _prune_target_cache(tgt_cache, tgt_out.ssm_steps, tgt_out.conv_steps, corrected_k - m + 1)
 
         if log and tokenizer is not None:
             print(f"Current gen_ids: ", tokenizer.decode(gen_ids[0, :cur_tgt_end_pos + corrected_k].tolist()))
@@ -263,8 +266,8 @@ def mamba_vanilla_decode(
             logits, method=sampling, top_k=top_k, top_p=top_p, temperature=temperature
         )
 
-        if next_token.item() == eos_id:
-            break
+        # if next_token.item() == eos_id:
+        #     break
 
         generated.append(next_token)
         next_input = next_token
