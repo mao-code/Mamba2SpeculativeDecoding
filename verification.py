@@ -4,8 +4,6 @@ import torch
 
 Tensor = torch.Tensor
 
-# TODO: accept target token ids, not the logits to adapt to different sampling strategy
-# Verification interface
 class VerificationStrategy(ABC):
     @abstractmethod
     def verify(
@@ -13,7 +11,7 @@ class VerificationStrategy(ABC):
         prop_buffer: Tensor,    # (1, k) drafted token IDs
         q_buffer: Tensor,       # (1, k) draft probabilities
         p_buffer: Tensor,       # (1, k) target probabilities
-        logits_prop: Tensor     # (1, k, V) target logits for each proposal
+        tgt_ids: Tensor         # (1, k) target token IDs
     ) -> Tuple[Tensor, int]:
         """
         Returns:
@@ -24,7 +22,7 @@ class VerificationStrategy(ABC):
 
 # Probability‐ratio sampling
 class RatioSamplingStrategy(VerificationStrategy):
-    def verify(self, prop_buffer, q_buffer, p_buffer, logits_prop):
+    def verify(self, prop_buffer, q_buffer, p_buffer, tgt_ids: Tensor):
         # u <= p/q (u is uniformly sampled in [0, 1])
         u = torch.rand_like(p_buffer)
         ratios = p_buffer / q_buffer
@@ -34,9 +32,7 @@ class RatioSamplingStrategy(VerificationStrategy):
 
 # Exact‐match: accept only if draft's proposal is the same as target's argmax
 class ExactMatchStrategy(VerificationStrategy):
-    def verify(self, prop_buffer, q_buffer, p_buffer, logits_prop):
-        # logits_prop: (1, k, V) -> greedy target tokens at each position
-        top_tokens = logits_prop.argmax(dim=-1)  # (1, k)
-        good = prop_buffer.eq(top_tokens)
+    def verify(self, prop_buffer, q_buffer, p_buffer, tgt_ids: Tensor):
+        good = prop_buffer.eq(tgt_ids)
         m = int(good.cumprod(dim=-1).sum())
         return good, m

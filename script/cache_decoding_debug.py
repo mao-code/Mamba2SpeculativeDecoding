@@ -193,6 +193,8 @@ def run_target_test(target, tok_tgt, prompt_ids, gen_ids, dft_proposed_ids, devi
     tgt_cache = tgt_out.cache_params
     rewind_output_ids = tgt_out.logits.argmax(-1, keepdim=True).view(-1)  # flatten all dimensions
 
+    # TODO: 讓log更好看一點
+    # 這邊確實看到兩者輸出不同
     # Compare the 2 results
     print("Compared target output:")
     print("Original output:", tok_tgt.decode(original_output_ids))

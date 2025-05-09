@@ -4,6 +4,13 @@ from typing import Optional, Tuple, List
 from Mamba2.modeling_mamba2 import Mamba2ForCausalLM, Mamba2Cache
 from verification import VerificationStrategy, RatioSamplingStrategy, ExactMatchStrategy
 from utils import set_random_seed
+from enum import Enum
+
+class RewindMode(str, Enum):
+    """Available rewind policies for the draft model."""
+
+    CLONE = "clone"          # deep‑clone (baseline)
+    RECOMP = "recompute"     # drop + recompute via cache_fwd
 
 def sample_token(
     logits: torch.Tensor,
@@ -15,7 +22,7 @@ def sample_token(
     """Utility to choose the next token according to a sampling strategy.
 
     Args:
-        logits (torch.Tensor): Logits for the last position, shape (B, vocab).
+        logits (torch.Tensor): Logits for the last position, shape (B, N, vocab).
         method (str): 'greedy', 'top_k', or 'top_p'.
         top_k (int): K value for top-K sampling (ignored if method != 'top_k').
         top_p (float): Cumulative probability threshold for top-p sampling (ignored if method != 'top_p').
@@ -56,6 +63,7 @@ def sample_token(
     probs_nucleus = sorted_probs * nucleus_mask
     probs_nucleus = probs_nucleus / probs_nucleus.sum(dim=-1, keepdim=True)
     next_token = torch.multinomial(probs_nucleus, num_samples=1)
+
     return sorted_indices.gather(-1, next_token)
 
 def snapshot_states(cache):
@@ -87,6 +95,7 @@ def mamba_spec_decode_seq(
     draft_temperature: float = 1.0,
     log: bool = False,
     tokenizer=None,
+    rewind_mode: RewindMode = RewindMode.CLONE,
 ):
     """Speculative decoding with optional sampling in the draft model."""
     target.eval(); draft.eval()
@@ -122,8 +131,12 @@ def mamba_spec_decode_seq(
         draft_tok_buffer = torch.empty(1, corrected_k, dtype=torch.long, device=device)
         q_buffer = torch.empty(1, corrected_k, dtype=torch.float, device=device)
 
-        ssm_hist: List[Tuple[torch.Tensor]] = []
-        conv_hist: List[Tuple[torch.Tensor]] = []
+        if rewind_mode == RewindMode.CLONE:
+            ssm_hist = []
+            conv_hist = []
+        elif rewind_mode == RewindMode.RECOMP:
+            initial_ssm_cache = None
+            initial_conv_cache = None
 
         # ---------------- Draft proposes ------------------------------
         for i in range(corrected_k):
@@ -149,9 +162,14 @@ def mamba_spec_decode_seq(
             draft_tok_buffer[:, i : i + 1] = next_tok
             q_buffer[:, i] = draft_prob.gather(-1, next_tok).squeeze(-1)
 
-            s, c = snapshot_states(draft_cache)
-            ssm_hist.append(s)
-            conv_hist.append(c)
+            if rewind_mode == RewindMode.CLONE:
+                s, c = snapshot_states(draft_cache)
+                ssm_hist.append(s)
+                conv_hist.append(c)
+            elif rewind_mode == RewindMode.RECOMP and i == 0:
+                s, c = snapshot_states(draft_cache)
+                initial_ssm_cache = s
+                initial_conv_cache = c
 
             gen_ids[0, cur_drft_end_pos] = next_tok.squeeze(-1)
             cur_drft_start_pos = cur_drft_end_pos
@@ -174,12 +192,13 @@ def mamba_spec_decode_seq(
         target_draft_logits = tgt_out.logits[:, :corrected_k, :]
         target_draft_prob = F.softmax(target_draft_logits, dim=-1)
         p_buffer = target_draft_prob.gather(-1, draft_tok_buffer.unsqueeze(-1)).squeeze(-1)
+        tgt_drft_token = sample_token(target_draft_logits, method=draft_sampling, temperature=draft_temperature)
 
         if log and tokenizer is not None:
-            all_target_token = tgt_out.logits.argmax(-1, keepdim=True).view(-1)
+            all_target_token = sample_token(tgt_out.logits, method=draft_sampling, temperature=draft_temperature).view(-1)
             print(f"[Iter {runs:3d}] Target tokens: ", tokenizer.decode(all_target_token))
 
-        good, m = verification_strategy.verify(draft_tok_buffer, q_buffer, p_buffer, target_draft_logits)
+        good, m = verification_strategy.verify(draft_tok_buffer, q_buffer, p_buffer, tgt_drft_token)
         total_accept_rate += m / K
 
         # ---------------- Commit tokens & cache bookkeeping ----------
@@ -200,8 +219,26 @@ def mamba_spec_decode_seq(
             gen_ids[0, cur_tgt_end_pos + m] = next_tgt_token
             gen_ids[0, cur_tgt_end_pos + m + 1 : cur_tgt_end_pos + corrected_k] = pad_token_id
 
-            draft_cache.ssm_states = ssm_hist[-(corrected_k - m)]
-            draft_cache.conv_states = conv_hist[-(corrected_k - m)]
+
+            if rewind_mode == RewindMode.CLONE:
+                draft_cache.ssm_states = ssm_hist[-(corrected_k - m)]
+                draft_cache.conv_states = conv_hist[-(corrected_k - m)]
+            elif rewind_mode == RewindMode.RECOMP:
+                draft_cache.ssm_states = initial_ssm_cache
+                draft_cache.conv_states = initial_conv_cache
+
+                if m > 0:
+                    accepted_tokens = gen_ids[:, cur_tgt_start_pos+1:cur_tgt_start_pos + m]
+                    dr_out = draft(
+                        input_ids=accepted_tokens,
+                        cache_params=draft_cache,
+                        use_cache=True,
+                        cache_fwd=True,
+                        return_dict=True,
+                        cache_position=torch.tensor([cur_tgt_start_pos], device=device),
+                    )
+                    draft_cache = dr_out.cache_params
+
             _prune_target_cache(tgt_cache, tgt_out.ssm_steps, tgt_out.conv_steps, corrected_k - m + 1)
 
         if log and tokenizer is not None:
