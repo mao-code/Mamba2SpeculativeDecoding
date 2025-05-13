@@ -311,11 +311,20 @@ class Mamba2Mixer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         cache_params: Optional[Mamba2Cache],
+        chunk_size: Optional[int] = None,
         attention_mask: Optional[torch.Tensor] = None,         
     ):
         B, K, _ = hidden_states.shape
         k_size = self.conv_kernel_size
         needs_cache = cache_params is not None
+
+        return_cache = False
+        return_all_states = False
+        if chunk_size is None:
+            chunk_size = K
+        elif chunk_size == 1:
+            return_all_states = True
+            return_cache = True
 
         # ---------------------------------------------------------------------
         # 1.  Linear projection and causal-conv on the *whole* block
@@ -341,24 +350,12 @@ class Mamba2Mixer(nn.Module):
             activation=self.activation
         ).transpose(1, 2)                            # back to (B, K, conv_dim)
 
-        # if self.activation not in {"silu", "swish"}:
-        #     xBC_conv = self.act(self.conv1d(xBC.transpose(1,2))[...,:K].transpose(1,2))
-        # else:
-        #     xBC_conv = causal_conv1d_fn(
-        #         xBC.transpose(1,2),
-        #         self.conv1d.weight.squeeze(1),
-        #         self.conv1d.bias,
-        #         activation=self.activation
-        #     ).transpose(1,2)
-        # xBC_conv = apply_mask_to_padding_states(xBC_conv, attention_mask)
-
         h, B_mat, C_mat = torch.split(xBC_conv, [self.intermediate_size, gts, gts], dim=-1)
-
 
         # ---------------------------------------------------------------------
         # 2.  Prepare arguments for the selective-scan kernel
         # ---------------------------------------------------------------------
-        A        = -torch.exp(self.A_log.float())
+        A = -torch.exp(self.A_log.float())
         kwargs_lim = {} if self.time_step_limit == (0., float("inf")) else {"dt_limit": self.time_step_limit}
 
         # dt       = dt[..., None].expand(-1, -1, self.head_dim)         # (B,K,hdim)
@@ -369,19 +366,25 @@ class Mamba2Mixer(nn.Module):
                     (needs_cache and cache_params.ssm_states[self.layer_idx] is not None)
                     else None)
 
-        y_ssm, final_ssm, step_ssm = mamba_chunk_scan_combined(
+        res = mamba_chunk_scan_combined(
             h_ssm, dt, A, B_mat, C_mat,
-            chunk_size = 1,                       # return every step
+            chunk_size = chunk_size,                      
             D = self.D,
             z = None,
             dt_bias = self.dt_bias,
             initial_states = prev_ssm,
-            return_all_states = True,
+            return_all_states = return_all_states,
             return_final_states = True,
             dt_softplus = True,
             **kwargs_lim
         )   
-        
+
+        if return_all_states:
+            y_ssm, final_ssm, step_ssm = res
+        else:
+            y_ssm, final_ssm = res
+            step_ssm = None
+
         # shapes:
         # y_ssm  (B,K,nH,hdim)
         # step   (B,K,nH,hdim,d_state)
@@ -391,7 +394,8 @@ class Mamba2Mixer(nn.Module):
         # ---------------------------------------------------------------------
         # 3.  Build the *per-token* convolution ring-buffer trajectory
         # ---------------------------------------------------------------------
-        if needs_cache:
+        traj = None
+        if needs_cache and return_cache:
             # 3-a) concat old ring buffer with NEW raw slices (xBC!)
             prev_conv = cache_params.conv_states[self.layer_idx]       # (B,conv_dim,k)
             new_slices = xBC.transpose(1,2)                            # (B,conv_dim,K)
@@ -404,15 +408,11 @@ class Mamba2Mixer(nn.Module):
             traj = traj.permute(0, 2, 1, 3).contiguous()# (B, K, conv_dim, k_size)
 
             # finally update in-place for the *next* bulk call
-            cache_params.update_conv_state(
-                self.layer_idx, traj[:, -1, :, :].transpose(1, 2), cache_init=False)
-            cache_params.update_ssm_state(
-                self.layer_idx, final_ssm)
-
-        # ---------------------------------------------------------------------
-        # 4.  Return
-        # ---------------------------------------------------------------------
+            # causal_conv1d_update will update using _copy
+            # cache_params.update_conv_state(self.layer_idx, traj[:, -1, :, :].transpose(1, 2), cache_init=False)
         
+        cache_params.update_ssm_state(self.layer_idx, final_ssm)
+
         return y, step_ssm, traj
 
     def cuda_kernels_forward(
@@ -777,13 +777,14 @@ class Mamba2Mixer(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
 
         cache_fwd: Optional[bool] = False,
+        chunk_size: Optional[int] = None,
     ):
         if is_fast_path_available and "cuda" in self.in_proj.weight.device.type:
             # Our new forward path with cache flag
             if cache_fwd:
                 return self.cache_fwd(hidden_states, cache_params, attention_mask)
 
-            return self.cuda_kernels_forward(hidden_states, cache_params, cache_position, attention_mask)
+            return self.cuda_kernels_forward(hidden_states, cache_params, cache_position, attention_mask, chunk_size)
         dtype = hidden_states.dtype
         if attention_mask is not None and attention_mask.shape[1] > 1 and attention_mask.shape[0] > 1:
             # tune out hidden states for pad tokens, see https://github.com/state-spaces/mamba/issues/66
@@ -825,7 +826,8 @@ class Mamba2Block(nn.Module):
         cache_position: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
 
-        cache_fwd: Optional[bool] = False 
+        cache_fwd: Optional[bool] = False,
+        chunk_size: Optional[int] = None
     ):
         residual = hidden_states
         hidden_states = self.norm(hidden_states.to(dtype=self.norm.weight.dtype))
@@ -839,6 +841,7 @@ class Mamba2Block(nn.Module):
             attention_mask=attention_mask,
 
             cache_fwd=cache_fwd,
+            chunk_size=chunk_size
         )
         hidden_states = residual + hidden_states
 
@@ -1063,6 +1066,7 @@ class Mamba2Model(Mamba2PreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
 
         cache_fwd: Optional[bool] = False,
+        chunk_size: Optional[int] = None,
         **kwargs,
     ) -> Union[Tuple, Mamba2Output]:
         output_hidden_states = (
@@ -1114,11 +1118,14 @@ class Mamba2Model(Mamba2PreTrainedModel):
                         cache_position=cache_position,
                         attention_mask=attention_mask,
 
-                        cache_fwd=cache_fwd
+                        cache_fwd=cache_fwd,
+                        chunk_size=chunk_size
                     )
                     hidden_states, ssm_step, conv_step = out
-                    all_ssm = all_ssm + (ssm_step,)
-                    all_conv = all_conv + (conv_step,)
+
+                    if chunk_size == 1:
+                        all_ssm = all_ssm + (ssm_step,)
+                        all_conv = all_conv + (conv_step,)
                 else:
                     hidden_states = mixer_block(
                         hidden_states,
@@ -1243,6 +1250,7 @@ class Mamba2ForCausalLM(Mamba2PreTrainedModel, GenerationMixin):
         attention_mask: Optional[torch.Tensor] = None,
 
         cache_fwd: Optional[bool] = False, 
+        chunk_size: Optional[int] = None,
         **kwargs,  # for now we need this for generation
     ) -> Union[Tuple, Mamba2CausalLMOutput]:
         r"""
@@ -1263,7 +1271,8 @@ class Mamba2ForCausalLM(Mamba2PreTrainedModel, GenerationMixin):
             cache_position=cache_position,
             attention_mask=attention_mask,
 
-            cache_fwd = cache_fwd
+            cache_fwd = cache_fwd,
+            chunk_size = chunk_size
         )
         hidden_states = mamba2_outputs[0]
 

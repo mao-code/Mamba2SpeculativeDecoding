@@ -87,7 +87,7 @@ def main():
     else:
         raise ValueError(f"Unknown verification strategy: {args.verification}")
 
-    rewind_mode = RewindMode.Recomp if args.rewind_mode == "recomp" else RewindMode.Clone
+    rewind_mode = RewindMode.RECOMP if args.rewind_mode == "recomp" else RewindMode.CLONE
 
     out_spec, t_spec = timed(
         mamba_spec_decode_seq, target, draft, prompt_ids, pad_token_id=tok_tgt.pad_token_id, K=args.K, max_new=args.new_tokens, verification_strategy=verification_strategy,

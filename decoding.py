@@ -79,6 +79,11 @@ def _prune_target_cache(cache, ssm_steps, conv_steps, num_tokens_to_prune):
         cache.ssm_states[l].copy_(ssm[:, -num_tokens_to_prune, :, :, :])
         cache.conv_states[l].copy_(conv[:, -num_tokens_to_prune, :, :])
 
+def restore_states(cache, ssm_snap, conv_snap):
+    for l, (s, c) in enumerate(zip(ssm_snap, conv_snap)):
+        cache.ssm_states[l].copy_(s)      # keeps dtype / device
+        cache.conv_states[l].copy_(c)
+
 # ----------------------- Speculative decoding ----------------------------
 @torch.inference_mode()
 def mamba_spec_decode_seq(
@@ -167,9 +172,7 @@ def mamba_spec_decode_seq(
                 ssm_hist.append(s)
                 conv_hist.append(c)
             elif rewind_mode == RewindMode.RECOMP and i == 0:
-                s, c = snapshot_states(draft_cache)
-                initial_ssm_cache = s
-                initial_conv_cache = c
+                initial_ssm_cache, initial_conv_cache = snapshot_states(draft_cache)
 
             gen_ids[0, cur_drft_end_pos] = next_tok.squeeze(-1)
             cur_drft_start_pos = cur_drft_end_pos
@@ -198,7 +201,7 @@ def mamba_spec_decode_seq(
             all_target_token = sample_token(tgt_out.logits, method=draft_sampling, temperature=draft_temperature).view(-1)
             print(f"[Iter {runs:3d}] Target tokens: ", tokenizer.decode(all_target_token))
 
-        good, m = verification_strategy.verify(draft_tok_buffer, q_buffer, p_buffer, tgt_drft_token)
+        good, m = verification_strategy.verify(draft_tok_buffer, q_buffer, p_buffer, tgt_drft_token.squeeze(-1))
         total_accept_rate += m / K
 
         # ---------------- Commit tokens & cache bookkeeping ----------
@@ -221,21 +224,22 @@ def mamba_spec_decode_seq(
 
 
             if rewind_mode == RewindMode.CLONE:
-                draft_cache.ssm_states = ssm_hist[-(corrected_k - m)]
-                draft_cache.conv_states = conv_hist[-(corrected_k - m)]
-            elif rewind_mode == RewindMode.RECOMP:
-                draft_cache.ssm_states = initial_ssm_cache
-                draft_cache.conv_states = initial_conv_cache
+                # draft_cache.ssm_states = ssm_hist[-(corrected_k - m)]
+                # draft_cache.conv_states = conv_hist[-(corrected_k - m)]
 
+                restore_states(draft_cache, ssm_hist[-(corrected_k - m)], conv_hist[-(corrected_k - m)])
+            elif rewind_mode == RewindMode.RECOMP:
+                restore_states(draft_cache, initial_ssm_cache, initial_conv_cache)
+                
                 if m > 0:
-                    accepted_tokens = gen_ids[:, cur_tgt_start_pos+1:cur_tgt_start_pos + m]
+                    accepted_tokens = gen_ids[:, cur_tgt_start_pos+1:cur_tgt_end_pos+m]
                     dr_out = draft(
                         input_ids=accepted_tokens,
                         cache_params=draft_cache,
                         use_cache=True,
                         cache_fwd=True,
                         return_dict=True,
-                        cache_position=torch.tensor([cur_tgt_start_pos], device=device),
+                        cache_position=torch.tensor([cur_tgt_start_pos+1], device=device),
                     )
                     draft_cache = dr_out.cache_params
 
