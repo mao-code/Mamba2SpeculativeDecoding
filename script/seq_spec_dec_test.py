@@ -26,6 +26,7 @@ def main():
     ap.add_argument("--sampling",   type=str, default="greedy", choices=["greedy", "top_k", "top_p"])
     ap.add_argument("--verification", type=str, default="ratio", choices=["ratio", "exact"])
     ap.add_argument("--rewind_mode", type=str, default="recomp", choices=["clone", "recomp"], help="Rewind mode for speculative decoding")
+    ap.add_argument("--chunk_size", type=int, default=1, help="Chunk size for cache scan kernel")
     ap.add_argument("--log", action="store_true", help="Log the verification process")
     args = ap.parse_args()
 
@@ -64,8 +65,8 @@ def main():
     assert tok_tgt.vocab_size == tok_drf.vocab_size, "Vocab size mismatch between target and draft models"
 
     # Warm up models (affect the speed a lot!)
-    warm_up_vanilla(draft, tok_drf, device)
-    warm_up_scan(target, tok_tgt, device)
+    warm_up_vanilla(draft, tok_drf, device, args.K)
+    warm_up_scan(target, tok_tgt, device, args.K)
 
     encoding = tok_tgt(
         args.prompt,
@@ -95,7 +96,8 @@ def main():
 
     out_spec, t_spec = timed(
         mamba_spec_decode_seq, target, draft, prompt_ids, pad_token_id=tok_tgt.pad_token_id, K=args.K, max_new=args.new_tokens, verification_strategy=verification_strategy,
-        log=args.log, tokenizer=tok_tgt, draft_sampling=args.sampling, rewind_mode=rewind_mode
+        log=args.log, tokenizer=tok_tgt, draft_sampling=args.sampling, rewind_mode=rewind_mode,
+        chunk_size=args.chunk_size,
     )
     out_spec_text = tok_tgt.decode(out_spec.view(-1))
     print("Speculative output:", out_spec_text)
@@ -135,5 +137,6 @@ if __name__ == "__main__":
     --verification exact \
     --sampling greedy \
     --rewind_mode recomp \
+    --chunk_size 1 \
     --log
     """

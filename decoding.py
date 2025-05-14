@@ -173,6 +173,7 @@ def mamba_spec_decode_seq(
     log: bool = False,
     tokenizer=None,
     rewind_mode: RewindMode = RewindMode.CLONE,
+    chunk_size: Optional[int] = None,
 ):
     """Speculative decoding with optional sampling in the draft model."""
     target.eval(); draft.eval()
@@ -261,6 +262,7 @@ def mamba_spec_decode_seq(
             cache_fwd=True,
             return_dict=True,
             cache_position=torch.tensor([cur_tgt_start_pos], device=device),
+            chunk_size=chunk_size
         )
         tgt_cache = tgt_out.cache_params
 
