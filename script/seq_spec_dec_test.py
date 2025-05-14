@@ -2,7 +2,7 @@ import argparse, time, torch
 from contextlib import nullcontext
 from transformers import AutoTokenizer
 from Mamba2.modeling_mamba2 import Mamba2ForCausalLM
-from decoding import mamba_spec_decode_seq, mamba_vanilla_decode, RewindMode
+from decoding import mamba_spec_decode_seq, mamba_vanilla_decode, RewindMode, warm_up_vanilla, warm_up_scan
 from transformers import AutoConfig
 from utils import set_random_seed
 from verification import VerificationStrategy, RatioSamplingStrategy, ExactMatchStrategy
@@ -62,6 +62,10 @@ def main():
     tok_tgt = AutoTokenizer.from_pretrained(args.target)
     tok_drf = AutoTokenizer.from_pretrained(args.draft)
     assert tok_tgt.vocab_size == tok_drf.vocab_size, "Vocab size mismatch between target and draft models"
+
+    # Warm up models (affect the speed a lot!)
+    warm_up_vanilla(draft, tok_drf, device)
+    warm_up_scan(target, tok_tgt, device)
 
     encoding = tok_tgt(
         args.prompt,

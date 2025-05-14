@@ -311,8 +311,8 @@ class Mamba2Mixer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         cache_params: Optional[Mamba2Cache],
-        chunk_size: Optional[int] = None,
-        attention_mask: Optional[torch.Tensor] = None,         
+        attention_mask: Optional[torch.Tensor] = None,    
+        chunk_size: Optional[int] = None     
     ):
         B, K, _ = hidden_states.shape
         k_size = self.conv_kernel_size
@@ -782,9 +782,9 @@ class Mamba2Mixer(nn.Module):
         if is_fast_path_available and "cuda" in self.in_proj.weight.device.type:
             # Our new forward path with cache flag
             if cache_fwd:
-                return self.cache_fwd(hidden_states, cache_params, attention_mask)
+                return self.cache_fwd(hidden_states, cache_params, attention_mask, chunk_size)
 
-            return self.cuda_kernels_forward(hidden_states, cache_params, cache_position, attention_mask, chunk_size)
+            return self.cuda_kernels_forward(hidden_states, cache_params, cache_position, attention_mask)
         dtype = hidden_states.dtype
         if attention_mask is not None and attention_mask.shape[1] > 1 and attention_mask.shape[0] > 1:
             # tune out hidden states for pad tokens, see https://github.com/state-spaces/mamba/issues/66

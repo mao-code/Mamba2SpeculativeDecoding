@@ -82,7 +82,79 @@ def _prune_target_cache(cache, ssm_steps, conv_steps, num_tokens_to_prune):
 def restore_states(cache, ssm_snap, conv_snap):
     for l, (s, c) in enumerate(zip(ssm_snap, conv_snap)):
         cache.ssm_states[l].copy_(s)      # keeps dtype / device
-        cache.conv_states[l].copy_(c)
+        cache.conv_states[l].copy_(c)    
+
+def warm_up_vanilla(model, tok, device, K):
+    print("Performing vanilla warm-up...")
+    dummy_prompt = "This is a dummy prompt for warm-up."
+    dummy_encoding = tok(dummy_prompt, return_tensors="pt", padding=True, truncation=True)
+    dummy_input_ids = dummy_encoding.input_ids.to(device)
+    dummy_input_len = dummy_input_ids.size(1)
+    dummy_pre_load_length = dummy_input_len - K
+
+    # Warm-up forward pass to set up cache
+    _ = model(
+        input_ids=dummy_input_ids[:, :dummy_pre_load_length],
+        use_cache=True,
+        return_dict=True,
+        cache_position=torch.tensor([0], device=device),
+    )
+    cache = _.cache_params
+
+    # Warm-up Vanilla Decoding
+    cache_pos = dummy_pre_load_length
+    for i in range(K):
+        token = dummy_input_ids[:, cache_pos : cache_pos + 1].to(device)
+        out = model(
+            input_ids=token,
+            cache_params=cache,
+            use_cache=True,
+            return_dict=True,
+            cache_position=torch.tensor([cache_pos], device=device),
+        )
+        cache = out.cache_params
+        cache_pos += 1
+
+    print("Vanilla warm-up completed.")
+
+def warm_up_scan(model, tok, device, K):
+    print("Performing cache scan kernel warm-up...")
+    dummy_prompt = "This is a dummy prompt for warm-up."
+    dummy_encoding = tok(dummy_prompt, return_tensors="pt", padding=True, truncation=True)
+    dummy_input_ids = dummy_encoding.input_ids.to(device)
+    dummy_input_len = dummy_input_ids.size(1)
+    dummy_pre_load_length = dummy_input_len - K
+
+    # Warm-up forward pass to set up cache
+    _ = model(
+        input_ids=dummy_input_ids[:, :dummy_pre_load_length],
+        use_cache=True,
+        return_dict=True,
+        cache_position=torch.tensor([0], device=device),
+    )
+    cache = _.cache_params
+
+    # Warm-up Cache Scan Decoding
+    out = model(
+        input_ids=dummy_input_ids[:, dummy_pre_load_length:],
+        cache_params=cache,
+        use_cache=True,
+        cache_fwd=True,
+        return_dict=True,
+        cache_position=torch.tensor([dummy_pre_load_length], device=device),
+        chunk_size=1
+    )
+
+    # Warm-up Cache Scan Chunk Decoding
+    out = model(
+        input_ids=dummy_input_ids[:, dummy_pre_load_length:],
+        cache_params=cache,
+        use_cache=True,
+        cache_fwd=True,
+        return_dict=True,
+        cache_position=torch.tensor([dummy_pre_load_length], device=device),
+    )
+    print("Cache scan kernel warm-up completed.")
 
 # ----------------------- Speculative decoding ----------------------------
 @torch.inference_mode()
